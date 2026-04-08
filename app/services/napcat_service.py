@@ -44,28 +44,37 @@ class NapCatService:
         if not str(cfg["ws_url"]).strip():
             logger.warning("NapCat disabled: NAPCAT_WS_URL is empty")
             return
+        '''
+        this is the core logic of the NapCat service client
+        1. clear the stop event to ensure the task can be restarted
+        2. create a new task to run the _run_loop method
+            this task will run in a loop and responsible for: connecting to the NapCat websocket server, receiving messages, and handling messages
+        '''
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run_loop())
+        logger.info("napcat service started")
 
     async def stop(self) -> None:
-        self._stop_event.set()
-        task = self._task
-        self._task = None
-        if task:
-            task.cancel()
+        self._stop_event.set()           # 1. set stop signal
+        task = self._task                # 2. save the current task reference
+        self._task = None                # 3. clear task reference
+        if task:                         # 4. if task exists
+            task.cancel()                # 5. cancel task
             try:
-                await task
+                await task               # 6. wait for task to complete
             except asyncio.CancelledError:
-                pass
-        if self._ws:
+                pass                     # 7. ignore cancellation exception
+        if self._ws:                     # 8. if WebSocket connection still exists
             try:
-                await self._ws.close()
+                await self._ws.close()   # 9. close WebSocket connection
             except Exception:
-                pass
-            self._ws = None
+                pass                     # 10. ignore close exception
+            self._ws = None              # 11. clear WebSocket reference
 
+
+    '''main loop'''
     async def _run_loop(self) -> None:
-        delay = 1.0
+        delay = 1.0 # delay to reconnect in seconds
         while not self._stop_event.is_set():
             cfg = self._config()
             ws_url = str(cfg["ws_url"]).strip()
