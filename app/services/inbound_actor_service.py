@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+import hashlib
 import logging
 import os
 import socket
@@ -81,6 +82,7 @@ class InboundActorService:
         self._session_factory = session_factory
         self._consumer_name = consumer_name or f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:6]}"
         self._actors: Dict[str, _ActorRuntimeState] = {}
+        self._actors_guard = asyncio.Lock()
         self._consumer_task: Optional[asyncio.Task] = None
         self._stopping = False
 
@@ -133,22 +135,39 @@ class InboundActorService:
         if self._bus is None:
             return
 
+        consecutive_failures = 0
         while not self._stopping:
-            messages = await self._bus.read_consumer_group(consumer_name=self._consumer_name)
-            for message in messages:
-                try:
-                    await self.enqueue_event(message.event)
-                except Exception:
-                    logger.exception("Inbound actor event handling failed: message_id=%s", message.message_id)
-                    continue
-                await self._bus.ack(message.message_id)
+            try:
+                config = self._current_config()
+                pending_idle_ms = max(1000, int(config["actor_retry_backoff_base_ms"]))
+                messages = await self._bus.reclaim_pending(
+                    consumer_name=self._consumer_name,
+                    min_idle_ms=pending_idle_ms,
+                )
+                if not messages:
+                    messages = await self._bus.read_consumer_group(consumer_name=self._consumer_name)
+
+                consecutive_failures = 0
+                for message in messages:
+                    try:
+                        await self.enqueue_event(self._bind_envelope_event(message))
+                    except Exception:
+                        logger.exception("Inbound actor event handling failed: message_id=%s", message.message_id)
+                        continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                delay_seconds = self._compute_consumer_backoff_seconds(consecutive_failures)
+                logger.warning("Inbound actor consumer read failed, retrying in %.2fs: %s", delay_seconds, exc)
+                await asyncio.sleep(delay_seconds)
 
     async def enqueue_event(self, event: InboundActorEvent) -> EnqueueResult:
         normalized_event = self._normalize_event(event)
         if not self._insert_dedup(normalized_event):
             return EnqueueResult(duplicate=True, actor_key=normalized_event.actor_key, generation_version=0)
 
-        state = self._get_or_create_state(normalized_event.channel, normalized_event.external_user_id)
+        state = await self._get_or_create_state(normalized_event.channel, normalized_event.external_user_id)
         config = self._current_config()
 
         async with state.lock:
@@ -202,13 +221,25 @@ class InboundActorService:
 
     def _normalize_event(self, event: InboundActorEvent) -> InboundActorEvent:
         occurred_at = event.occurred_at if isinstance(event.occurred_at, datetime) else datetime.now()
+        channel = str(event.channel or "").strip().lower() or "wecom"
+        external_user_id = str(event.external_user_id or "").strip()
+        payload = dict(event.payload or {})
+        source_message_id = str(event.source_message_id or "").strip() or None
+        event_id = str(event.event_id or "").strip()
+        if not event_id:
+            if source_message_id:
+                event_id = f"stream:{source_message_id}"
+            else:
+                payload_fingerprint = hashlib.sha256(repr(sorted(payload.items())).encode("utf-8")).hexdigest()
+                event_id = f"synthetic:{channel}:{external_user_id}:{occurred_at.isoformat()}:{payload_fingerprint}"
         return InboundActorEvent(
-            event_id=str(event.event_id or "").strip(),
-            channel=str(event.channel or "").strip().lower() or "wecom",
-            external_user_id=str(event.external_user_id or "").strip(),
-            payload=dict(event.payload or {}),
+            event_id=event_id,
+            channel=channel,
+            external_user_id=external_user_id,
+            payload=payload,
             attempt=max(0, int(event.attempt or 0)),
             occurred_at=occurred_at,
+            source_message_id=source_message_id,
         )
 
     def _insert_dedup(self, event: InboundActorEvent) -> bool:
@@ -223,36 +254,37 @@ class InboundActorService:
         finally:
             db.close()
 
-    def _get_or_create_state(self, channel: str, external_user_id: str) -> _ActorRuntimeState:
+    async def _get_or_create_state(self, channel: str, external_user_id: str) -> _ActorRuntimeState:
         key = self.actor_key(channel, external_user_id)
-        state = self._actors.get(key)
-        if state is not None:
-            return state
+        async with self._actors_guard:
+            state = self._actors.get(key)
+            if state is not None:
+                return state
 
-        db = self._session_factory()
-        try:
-            persisted = (
-                db.query(ActorInflightState)
-                .filter(
-                    ActorInflightState.channel == channel,
-                    ActorInflightState.external_user_id == external_user_id,
+            db = self._session_factory()
+            try:
+                persisted = (
+                    db.query(ActorInflightState)
+                    .filter(
+                        ActorInflightState.channel == channel,
+                        ActorInflightState.external_user_id == external_user_id,
+                    )
+                    .first()
                 )
-                .first()
-            )
-        finally:
-            db.close()
+            finally:
+                db.close()
 
-        state = _ActorRuntimeState(
-            channel=channel,
-            external_user_id=external_user_id,
-            actor_key=key,
-            generation_version=int(persisted.generation_version) if persisted else 0,
-            status="collecting",
-            last_event_at=persisted.last_event_at if persisted else None,
-        )
-        self._actors[key] = state
-        self._persist_actor_state(state)
-        return state
+            state = _ActorRuntimeState(
+                channel=channel,
+                external_user_id=external_user_id,
+                actor_key=key,
+                generation_version=int(persisted.generation_version) if persisted else 0,
+                status="collecting",
+                last_event_at=persisted.last_event_at if persisted else None,
+            )
+            self._actors[key] = state
+            self._persist_actor_state(state)
+            return state
 
     def _persist_actor_state(self, state: _ActorRuntimeState) -> None:
         db = self._session_factory()
@@ -292,7 +324,7 @@ class InboundActorService:
         state.status = "collecting"
         self._persist_actor_state(state)
 
-    def _schedule_turn_locked(self, state: _ActorRuntimeState, *, immediate: bool) -> None:
+    def _schedule_turn_locked(self, state: _ActorRuntimeState, *, immediate: bool, delay_seconds: Optional[float] = None) -> None:
         if self._stopping or not state.buffer:
             return
         if state.turn_task and not state.turn_task.done():
@@ -306,7 +338,9 @@ class InboundActorService:
             state.turn_task = asyncio.create_task(self._run_turn(state.actor_key))
             return
 
-        debounce_seconds = self._current_config()["actor_debounce_ms"] / 1000.0
+        debounce_seconds = delay_seconds
+        if debounce_seconds is None:
+            debounce_seconds = self._current_config()["actor_debounce_ms"] / 1000.0
         state.debounce_task = asyncio.create_task(self._debounce_then_process(state.actor_key, debounce_seconds))
 
     async def _debounce_then_process(self, actor_key: str, delay_seconds: float) -> None:
@@ -378,8 +412,10 @@ class InboundActorService:
             delivery_task = asyncio.create_task(self._deliver_reply(turn, reply))
             async with state.lock:
                 state.delivery_task = delivery_task
+            delivered = False
             try:
                 await delivery_task
+                delivered = True
             except asyncio.CancelledError:
                 pass
             finally:
@@ -388,7 +424,8 @@ class InboundActorService:
                         state.delivery_task = None
 
             async with state.lock:
-                if state.generation_version == turn_version and not self._stopping:
+                if delivered and state.generation_version == turn_version and not self._stopping:
+                    await self._ack_events(turn.events)
                     state.status = "collecting"
                 await self._finish_turn_locked(state)
         except Exception as exc:
@@ -415,6 +452,7 @@ class InboundActorService:
 
         retried_events: list[InboundActorEvent] = []
         dlq_events: list[DlqActorEvent] = []
+        dlq_ack_events: list[InboundActorEvent] = []
         for event in turn_events:
             next_event = replace(event, attempt=event.attempt + 1)
             if next_event.attempt > retry_max_attempts:
@@ -425,15 +463,19 @@ class InboundActorService:
                         error_message=str(exc),
                     )
                 )
+                dlq_ack_events.append(event)
             else:
                 retried_events.append(next_event)
 
         if self._bus is not None:
-            for dlq_event in dlq_events:
+            successfully_published_dlq_events: list[InboundActorEvent] = []
+            for dlq_event, original_event in zip(dlq_events, dlq_ack_events):
                 try:
                     await self._bus.publish_dlq_event(dlq_event)
+                    successfully_published_dlq_events.append(original_event)
                 except Exception:
                     logger.exception("Failed to publish DLQ event: actor=%s", state.actor_key)
+            await self._ack_events(successfully_published_dlq_events)
 
         async with state.lock:
             if state.generation_version == turn_version:
@@ -443,7 +485,50 @@ class InboundActorService:
             state.turn_task = None
             self._persist_actor_state(state)
             if state.buffer and not self._stopping:
-                self._schedule_turn_locked(state, immediate=True)
+                retry_delay_seconds = self._compute_retry_backoff_seconds(retried_events)
+                self._schedule_turn_locked(
+                    state,
+                    immediate=retry_delay_seconds <= 0,
+                    delay_seconds=retry_delay_seconds if retry_delay_seconds > 0 else None,
+                )
+
+    @staticmethod
+    def _bind_envelope_event(envelope: StreamEnvelope) -> InboundActorEvent:
+        if envelope.event.source_message_id == envelope.message_id:
+            return envelope.event
+        return replace(envelope.event, source_message_id=envelope.message_id)
+
+    async def _ack_events(self, events: Sequence[InboundActorEvent]) -> None:
+        if self._bus is None:
+            return
+
+        message_ids = list(
+            dict.fromkeys(
+                str(event.source_message_id or "").strip()
+                for event in events
+                if str(event.source_message_id or "").strip()
+            )
+        )
+        if not message_ids:
+            return
+        await self._bus.ack(*message_ids)
+
+    def _compute_retry_backoff_seconds(self, events: Sequence[InboundActorEvent]) -> float:
+        if not events:
+            return 0.0
+        base_ms = int(self._current_config()["actor_retry_backoff_base_ms"])
+        if base_ms <= 0:
+            return 0.0
+        attempt = max(int(event.attempt or 0) for event in events)
+        exponent = max(0, attempt - 1)
+        return (base_ms * (2**exponent)) / 1000.0
+
+    def _compute_consumer_backoff_seconds(self, consecutive_failures: int) -> float:
+        base_ms = int(self._current_config()["actor_retry_backoff_base_ms"])
+        if base_ms <= 0:
+            base_ms = 300
+        exponent = max(0, min(consecutive_failures - 1, 4))
+        return (base_ms * (2**exponent)) / 1000.0
 
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:
         user_message = self._merge_user_message(turn.events)

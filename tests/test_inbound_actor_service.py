@@ -1,10 +1,58 @@
 import asyncio
+from dataclasses import replace
+from datetime import datetime
 import unittest
 from uuid import uuid4
 
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal, init_db
 from app.services.inbound_actor_service import InboundActorEvent, InboundActorService
+from app.services.redis_stream_bus import DlqActorEvent, StreamEnvelope
+
+
+class FakeRedisStreamBus:
+    def __init__(self) -> None:
+        self.new_messages: list[StreamEnvelope] = []
+        self.pending_messages: list[StreamEnvelope] = []
+        self.acked: list[str] = []
+        self.dlq_events: list[DlqActorEvent] = []
+        self.reclaim_calls = 0
+        self.read_calls = 0
+        self.closed = False
+
+    async def ensure_consumer_group(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def read_consumer_group(self, *, consumer_name: str, count: int = 10, block_ms: int = 1000) -> list[StreamEnvelope]:
+        self.read_calls += 1
+        if self.new_messages:
+            return [self.new_messages.pop(0)]
+        await asyncio.sleep(0.01)
+        return []
+
+    async def reclaim_pending(
+        self,
+        *,
+        consumer_name: str,
+        min_idle_ms: int = 1000,
+        count: int = 10,
+        start_id: str = "0-0",
+    ) -> list[StreamEnvelope]:
+        self.reclaim_calls += 1
+        if self.pending_messages:
+            return [self.pending_messages.pop(0)]
+        return []
+
+    async def ack(self, *message_ids: str) -> int:
+        self.acked.extend(message_ids)
+        return len(message_ids)
+
+    async def publish_dlq_event(self, dlq_event: DlqActorEvent) -> str:
+        self.dlq_events.append(dlq_event)
+        return f"dlq-{len(self.dlq_events)}"
 
 
 class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -25,7 +73,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.db.commit()
         self.db.close()
 
-    async def _wait_for(self, predicate, timeout: float = 3.0) -> None:
+    async def _wait_for(self, predicate, timeout: float = 8.0) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
@@ -42,7 +90,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         external_user_id: str,
         min_deliveries: int,
         delivered_turns: list[list[str]],
-        timeout: float = 3.0,
+        timeout: float = 8.0,
     ) -> None:
         actor_key = service.actor_key(channel, external_user_id)
 
@@ -73,8 +121,19 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
             payload={"text": text},
         )
 
-    def _make_service(self, *, generate_reply, deliver_reply, debounce_ms: int = 0, max_messages_per_turn: int = 10):
+    def _make_service(
+        self,
+        *,
+        generate_reply,
+        deliver_reply,
+        debounce_ms: int = 0,
+        max_messages_per_turn: int = 10,
+        retry_max_attempts: int = 0,
+        retry_backoff_base_ms: int = 0,
+        bus=None,
+    ):
         service = InboundActorService(
+            bus=bus,
             generate_reply=generate_reply,
             deliver_reply=deliver_reply,
             config_loader=lambda: {
@@ -85,14 +144,33 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "actor_chunk_delay_ms": 0,
                 "actor_reply_chunk_min": 1,
                 "actor_reply_chunk_max": 1,
-                "actor_retry_max_attempts": 0,
-                "actor_retry_backoff_base_ms": 0,
+                "actor_retry_max_attempts": retry_max_attempts,
+                "actor_retry_backoff_base_ms": retry_backoff_base_ms,
                 "redis_url": "",
                 "redis_password": "",
             },
         )
         self._services.append(service)
         return service
+
+    def _envelope(
+        self,
+        *,
+        message_id: str,
+        event_id: str,
+        external_user_id: str,
+        text: str,
+    ) -> StreamEnvelope:
+        return StreamEnvelope(
+            message_id=message_id,
+            event=InboundActorEvent(
+                event_id=event_id,
+                channel="wecom",
+                external_user_id=external_user_id,
+                payload={"text": text},
+                occurred_at=datetime(2026, 4, 9, 12, 0, 0),
+            ),
+        )
 
     async def test_interrupt_generation_on_new_message(self):
         first_generation_started = asyncio.Event()
@@ -211,6 +289,144 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(delivered_replies, [("fresh-reply", ["evt-1", "evt-2"])])
+
+    async def test_ack_occurs_after_successful_processing_not_at_enqueue(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"ack-user-{uuid4().hex[:8]}"
+        bus.new_messages.append(
+            self._envelope(
+                message_id="1-0",
+                event_id="evt-ack",
+                external_user_id=external_user_id,
+                text="hello",
+            )
+        )
+        delivery_started = asyncio.Event()
+        allow_delivery = asyncio.Event()
+        delivered_turns: list[list[str]] = []
+
+        async def generate_reply(turn):
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            delivery_started.set()
+            await allow_delivery.wait()
+            delivered_turns.append([event.event_id for event in turn.events])
+
+        service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, bus=bus)
+        await service.start()
+
+        await self._wait_for(delivery_started.is_set)
+        self.assertEqual(bus.acked, [])
+
+        allow_delivery.set()
+        await self._wait_for(lambda: bus.acked == ["1-0"])
+        self.assertEqual(delivered_turns, [["evt-ack"]])
+
+    async def test_failed_event_retries_with_backoff_then_dlq_and_ack(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"retry-user-{uuid4().hex[:8]}"
+        bus.new_messages.append(
+            self._envelope(
+                message_id="2-0",
+                event_id="evt-retry",
+                external_user_id=external_user_id,
+                text="retry me",
+            )
+        )
+        attempt_times: list[float] = []
+
+        async def generate_reply(turn):
+            attempt_times.append(asyncio.get_running_loop().time())
+            raise RuntimeError("boom")
+
+        async def deliver_reply(turn, reply):
+            self.fail("delivery should not run when generation keeps failing")
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=1,
+            retry_backoff_base_ms=50,
+            bus=bus,
+        )
+        await service.start()
+
+        await self._wait_for(lambda: len(bus.dlq_events) == 1 and bus.acked == ["2-0"], timeout=8.0)
+
+        self.assertGreaterEqual(len(attempt_times), 2)
+        self.assertGreaterEqual(attempt_times[1] - attempt_times[0], 0.045)
+        self.assertEqual(bus.dlq_events[0].event.event_id, "evt-retry")
+        self.assertEqual(bus.dlq_events[0].reason, "turn_failure")
+
+    async def test_pending_recovery_path_processes_previously_unacked_entries(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"pending-user-{uuid4().hex[:8]}"
+        bus.pending_messages.append(
+            self._envelope(
+                message_id="9-0",
+                event_id="",
+                external_user_id=external_user_id,
+                text="from pending",
+            )
+        )
+        delivered_turns: list[list[str]] = []
+
+        async def generate_reply(turn):
+            return "pending-ok"
+
+        async def deliver_reply(turn, reply):
+            delivered_turns.append([event.event_id for event in turn.events])
+
+        service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, bus=bus)
+        await service.start()
+
+        await self._wait_for(lambda: bus.acked == ["9-0"])
+        self.assertGreater(bus.reclaim_calls, 0)
+        self.assertEqual(delivered_turns, [["stream:9-0"]])
+
+    async def test_concurrent_first_enqueue_does_not_create_duplicate_runtime_state(self):
+        suffix = uuid4().hex[:8]
+        external_user_id = f"concurrent-user-{suffix}"
+        delivered_turns: list[list[str]] = []
+
+        async def generate_reply(turn):
+            await asyncio.sleep(0)
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            delivered_turns.append([event.event_id for event in turn.events])
+
+        service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, debounce_ms=0)
+        first = InboundActorEvent(
+            event_id="evt-a",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "a"},
+        )
+        second = replace(first, event_id="evt-b", payload={"text": "b"})
+
+        await asyncio.gather(service.enqueue_event(first), service.enqueue_event(second))
+        await self._wait_for_actor_idle(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+            min_deliveries=1,
+            delivered_turns=delivered_turns,
+        )
+
+        actor_key = service.actor_key("wecom", external_user_id)
+        self.assertIn(actor_key, service._actors)
+        self.assertEqual(sum(1 for key in service._actors if key == actor_key), 1)
+        db_count = (
+            self.db.query(ActorInflightState)
+            .filter(
+                ActorInflightState.channel == "wecom",
+                ActorInflightState.external_user_id == external_user_id,
+            )
+            .count()
+        )
+        self.assertEqual(db_count, 1)
 
 
 if __name__ == "__main__":

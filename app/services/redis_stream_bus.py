@@ -35,6 +35,7 @@ class InboundActorEvent:
     payload: Dict[str, object] = field(default_factory=dict)
     attempt: int = 0
     occurred_at: datetime = field(default_factory=datetime.now)
+    source_message_id: Optional[str] = None
 
     @property
     def actor_key(self) -> str:
@@ -142,7 +143,34 @@ class RedisStreamBus:
         messages: List[StreamEnvelope] = []
         for _, items in response or []:
             for message_id, fields in items:
-                messages.append(StreamEnvelope(message_id=message_id, event=self._deserialize_event(fields)))
+                messages.append(StreamEnvelope(message_id=message_id, event=self._deserialize_event(message_id, fields)))
+        return messages
+
+    async def reclaim_pending(
+        self,
+        *,
+        consumer_name: str,
+        min_idle_ms: int = 1000,
+        count: int = 10,
+        start_id: str = "0-0",
+    ) -> List[StreamEnvelope]:
+        await self.ensure_consumer_group()
+        response = await self._client.xautoclaim(
+            name=self._inbound_stream,
+            groupname=self._consumer_group,
+            consumername=consumer_name,
+            min_idle_time=max(0, int(min_idle_ms)),
+            start_id=start_id,
+            count=count,
+        )
+
+        messages: List[StreamEnvelope] = []
+        claimed_items = []
+        if isinstance(response, (list, tuple)) and len(response) >= 2:
+            claimed_items = response[1] or []
+
+        for message_id, fields in claimed_items:
+            messages.append(StreamEnvelope(message_id=message_id, event=self._deserialize_event(message_id, fields)))
         return messages
 
     async def ack(self, *message_ids: str) -> int:
@@ -163,7 +191,7 @@ class RedisStreamBus:
         }
 
     @staticmethod
-    def _deserialize_event(fields: Dict[str, Any]) -> InboundActorEvent:
+    def _deserialize_event(message_id: str, fields: Dict[str, Any]) -> InboundActorEvent:
         raw_payload = fields.get("payload")
         payload: Dict[str, object] = {}
         if isinstance(raw_payload, str) and raw_payload.strip():
@@ -182,11 +210,13 @@ class RedisStreamBus:
             except ValueError:
                 logger.warning("Invalid inbound actor occurred_at=%s", occurred_at_raw)
 
+        event_id = str(fields.get("event_id") or "").strip() or f"stream:{message_id}"
         return InboundActorEvent(
-            event_id=str(fields.get("event_id") or "").strip(),
+            event_id=event_id,
             channel=str(fields.get("channel") or "").strip() or "wecom",
             external_user_id=str(fields.get("external_user_id") or "").strip(),
             payload=payload,
             attempt=int(fields.get("attempt") or 0),
             occurred_at=occurred_at,
+            source_message_id=message_id,
         )
