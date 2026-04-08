@@ -492,6 +492,60 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bus.acked, ["1-legacy"])
         self.assertEqual(bus.dlq_events, [])
 
+    async def test_successful_turn_persists_conversation_and_schedules_memory(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"persist-user-{uuid4().hex[:8]}"
+        event = InboundActorEvent(
+            event_id="evt-persist",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "hello there"},
+            source_message_id="1-persist",
+        )
+
+        async def generate_reply(turn):
+            return "saved reply"
+
+        async def deliver_reply(turn, reply):
+            return {"status": "sent"}
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=0,
+            bus=bus,
+        )
+
+        with (
+            patch("app.services.inbound_actor_service.save_conversation", AsyncMock(return_value=321)) as save_mock,
+            patch("app.services.inbound_actor_service.schedule_memory_processing") as schedule_mock,
+        ):
+            await service.enqueue_event(event)
+            await self._wait_for_actor_quiescent(
+                service,
+                channel="wecom",
+                external_user_id=external_user_id,
+            )
+
+        self.assertEqual(bus.acked, ["1-persist"])
+        save_mock.assert_awaited_once_with(
+            channel="wecom",
+            external_user_id=external_user_id,
+            user_message="hello there",
+            agent_message="saved reply",
+            user_emotion={"neutral": 1.0},
+            agent_emotion={"current_mood": "caring", "intensity": 0},
+        )
+        schedule_mock.assert_called_once_with(
+            channel="wecom",
+            external_user_id=external_user_id,
+            conversation_id=321,
+            user_message="hello there",
+            agent_message="saved reply",
+            user_emotion={"neutral": 1.0},
+            agent_emotion={"current_mood": "caring", "intensity": 0},
+        )
+
     async def test_explicit_failed_delivery_result_enters_failure_path(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"failed-delivery-user-{uuid4().hex[:8]}"

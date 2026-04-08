@@ -3,6 +3,7 @@ Admin backend API.
 """
 
 from hmac import compare_digest
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -19,6 +20,7 @@ from app.schemas.admin import (
     UserMemoryPayload,
 )
 from app.services.emotion_engine import emotion_engine  # test patch compatibility
+from app.services.inbound_actor_service import inbound_actor_service
 from app.services.llm_service import glm_service  # test patch compatibility
 from app.services.memory_service import memory_service
 from app.services.persona_service import persona_service
@@ -26,6 +28,7 @@ from app.services.proactive_chat_service import proactive_chat_service
 from app.services.runtime_config_service import runtime_config_service
 
 router = APIRouter(prefix="/admin-api", tags=["管理后台"])
+logger = logging.getLogger(__name__)
 
 
 def _resolve_channel_identity(
@@ -91,7 +94,17 @@ async def get_actor_settings(_: bool = Depends(require_admin)):
 async def update_actor_settings(payload: ActorSettingsPayload, _: bool = Depends(require_admin)):
     body = payload.model_dump(exclude_unset=True)
     runtime_config_service.save_actor_settings(body)
-    return runtime_config_service.get_actor_settings_payload()
+    actor_settings = runtime_config_service.get_actor_settings_payload()
+    actor_enabled = bool(runtime_config_service.get_effective_actor_config()["actor_pipeline_enabled"])
+    try:
+        if actor_enabled:
+            await inbound_actor_service.start()
+        else:
+            await inbound_actor_service.stop()
+    except Exception as exc:
+        logger.exception("Failed to apply actor pipeline lifecycle after settings update")
+        raise HTTPException(status_code=500, detail=f"Failed to apply actor pipeline lifecycle: {exc}")
+    return actor_settings
 
 
 @router.put("/proactive-chat")

@@ -71,7 +71,10 @@ async def lifespan(app: FastAPI):
     proactive_scheduler_task = asyncio.create_task(proactive_chat_service.scheduler_loop())
     actor_config = runtime_config_service.get_effective_actor_config()
     if actor_config["actor_pipeline_enabled"]:
-        await inbound_actor_service.start()
+        try:
+            await inbound_actor_service.start()
+        except Exception:
+            logger.exception("Actor pipeline startup failed; continuing without background actor consumer")
 
     yield
 

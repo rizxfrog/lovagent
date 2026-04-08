@@ -17,6 +17,7 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 
 from app.graph import run_preview_graph
+from app.graph.executors import save_conversation, schedule_memory_processing
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal
 from app.services.channel_dispatcher import channel_dispatcher
@@ -490,9 +491,17 @@ class InboundActorService:
             if not delivered and delivery_status not in {"sent", "cancelled"}:
                 raise RuntimeError(f"delivery_{delivery_status}")
 
+            should_finalize_success = False
             async with state.lock:
                 if delivered and state.generation_version == turn_version and not self._stopping:
-                    await self._ack_events(turn.events)
+                    should_finalize_success = True
+
+            if should_finalize_success:
+                await self._persist_successful_turn(turn, reply)
+                await self._ack_events(turn.events)
+
+            async with state.lock:
+                if should_finalize_success:
                     state.status = "collecting"
                 await self._finish_turn_locked(state)
         except Exception as exc:
@@ -671,6 +680,28 @@ class InboundActorService:
             sent_chunks = getattr(delivery_result, "sent_chunks", 0)
             return int(sent_chunks or 0) > 0
         return True
+
+    async def _persist_successful_turn(self, turn: InboundActorTurn, reply: str) -> None:
+        user_message = self._merge_user_message(turn.events)
+        user_emotion = {"neutral": 1.0}
+        agent_emotion = {"current_mood": "caring", "intensity": 0}
+        conversation_id = await save_conversation(
+            channel=turn.channel,
+            external_user_id=turn.external_user_id,
+            user_message=user_message,
+            agent_message=reply,
+            user_emotion=user_emotion,
+            agent_emotion=agent_emotion,
+        )
+        schedule_memory_processing(
+            channel=turn.channel,
+            external_user_id=turn.external_user_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            agent_message=reply,
+            user_emotion=user_emotion,
+            agent_emotion=agent_emotion,
+        )
 
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:
         user_message = self._merge_user_message(turn.events)

@@ -587,6 +587,48 @@ class AdminApiTests(unittest.TestCase):
                 "runtime-secret",
             )
 
+    def test_actor_settings_put_starts_actor_service_when_enabled(self):
+        self.login()
+        payload = {
+            "redis_url": "redis://runtime.example.com:6379/2",
+            "actor_pipeline_enabled": True,
+            "actor_debounce_ms": 2400,
+            "actor_max_messages_per_turn": 10,
+            "actor_first_reply_delay_ms": 300,
+            "actor_chunk_delay_ms": 200,
+            "actor_reply_chunk_min": 1,
+            "actor_reply_chunk_max": 5,
+            "actor_retry_max_attempts": 3,
+            "actor_retry_backoff_base_ms": 300,
+        }
+
+        with patch("app.routers.admin.inbound_actor_service.start", AsyncMock()) as start_mock:
+            response = self.client.put("/admin-api/actor-settings", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        start_mock.assert_awaited_once()
+
+    def test_actor_settings_put_stops_actor_service_when_disabled(self):
+        self.login()
+        payload = {
+            "redis_url": "redis://runtime.example.com:6379/2",
+            "actor_pipeline_enabled": False,
+            "actor_debounce_ms": 2400,
+            "actor_max_messages_per_turn": 10,
+            "actor_first_reply_delay_ms": 300,
+            "actor_chunk_delay_ms": 200,
+            "actor_reply_chunk_min": 1,
+            "actor_reply_chunk_max": 5,
+            "actor_retry_max_attempts": 3,
+            "actor_retry_backoff_base_ms": 300,
+        }
+
+        with patch("app.routers.admin.inbound_actor_service.stop", AsyncMock()) as stop_mock:
+            response = self.client.put("/admin-api/actor-settings", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        stop_mock.assert_awaited_once()
+
     def test_actor_settings_get_strips_userinfo_from_redis_url(self):
         self.login()
         cases = [
@@ -672,9 +714,11 @@ class AdminApiTests(unittest.TestCase):
         sanitized_payload = get_response.json()
         self.assertEqual(sanitized_payload["redis_url"], "redis://cache.example.com:6379/4?foo=bar")
 
-        put_response = self.client.put("/admin-api/actor-settings", json=sanitized_payload)
+        with patch("app.routers.admin.inbound_actor_service.start", AsyncMock()) as start_mock:
+            put_response = self.client.put("/admin-api/actor-settings", json=sanitized_payload)
 
         self.assertEqual(put_response.status_code, 200)
+        start_mock.assert_awaited_once()
         self.assertEqual(put_response.json()["redis_url"], "redis://cache.example.com:6379/4?foo=bar")
         self.assertEqual(runtime_config_service.get_config()["channels_actor"]["redis_url"], raw_redis_url)
         self.assertEqual(runtime_config_service.get_effective_actor_config()["redis_url"], raw_redis_url)
