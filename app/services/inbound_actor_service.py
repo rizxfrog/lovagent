@@ -11,7 +11,7 @@ import hashlib
 import logging
 import os
 import socket
-from typing import Awaitable, Callable, Dict, Optional, Sequence
+from typing import Awaitable, Callable, Dict, Literal, Optional, Sequence
 from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 GenerateReplyFn = Callable[["InboundActorTurn"], Awaitable[str]]
 DeliverReplyFn = Callable[["InboundActorTurn", str], Awaitable[object]]
 ConfigLoaderFn = Callable[[], Dict[str, object]]
+DedupState = Literal["new_pending", "existing_pending", "processed_duplicate"]
 
 
 @dataclass(frozen=True)
@@ -167,7 +168,8 @@ class InboundActorService:
 
     async def enqueue_event(self, event: InboundActorEvent) -> EnqueueResult:
         normalized_event = self._normalize_event(event)
-        if not self._insert_dedup(normalized_event):
+        dedup_state = self._ensure_dedup_record(normalized_event)
+        if dedup_state == "processed_duplicate":
             return EnqueueResult(
                 duplicate=True,
                 actor_key=normalized_event.actor_key,
@@ -251,15 +253,36 @@ class InboundActorService:
             source_message_id=source_message_id,
         )
 
-    def _insert_dedup(self, event: InboundActorEvent) -> bool:
+    def _ensure_dedup_record(self, event: InboundActorEvent) -> DedupState:
         db = self._session_factory()
         try:
-            db.add(InboundEventDedup(event_id=event.event_id, actor_key=event.actor_key))
+            record = (
+                db.query(InboundEventDedup)
+                .filter(
+                    InboundEventDedup.event_id == event.event_id,
+                    InboundEventDedup.actor_key == event.actor_key,
+                )
+                .first()
+            )
+            if record is not None:
+                return "processed_duplicate" if record.processed_at is not None else "existing_pending"
+
+            db.add(InboundEventDedup(event_id=event.event_id, actor_key=event.actor_key, processed_at=None))
             db.commit()
-            return True
+            return "new_pending"
         except IntegrityError:
             db.rollback()
-            return False
+            record = (
+                db.query(InboundEventDedup)
+                .filter(
+                    InboundEventDedup.event_id == event.event_id,
+                    InboundEventDedup.actor_key == event.actor_key,
+                )
+                .first()
+            )
+            if record is not None and record.processed_at is not None:
+                return "processed_duplicate"
+            return "existing_pending"
         finally:
             db.close()
 
@@ -460,31 +483,35 @@ class InboundActorService:
         retry_max_attempts = int(config["actor_retry_max_attempts"])
 
         retried_events: list[InboundActorEvent] = []
-        dlq_events: list[DlqActorEvent] = []
-        dlq_ack_events: list[InboundActorEvent] = []
+        exhausted_events: list[tuple[InboundActorEvent, DlqActorEvent]] = []
         for event in turn_events:
             next_event = replace(event, attempt=event.attempt + 1)
             if next_event.attempt > retry_max_attempts:
-                dlq_events.append(
-                    DlqActorEvent(
-                        event=next_event,
-                        reason="turn_failure",
-                        error_message=str(exc),
+                exhausted_events.append(
+                    (
+                        next_event,
+                        DlqActorEvent(
+                            event=next_event,
+                            reason="turn_failure",
+                            error_message=str(exc),
+                        ),
                     )
                 )
-                dlq_ack_events.append(event)
             else:
                 retried_events.append(next_event)
 
         if self._bus is not None:
             successfully_published_dlq_events: list[InboundActorEvent] = []
-            for dlq_event, original_event in zip(dlq_events, dlq_ack_events):
+            for exhausted_event, dlq_event in exhausted_events:
                 try:
                     await self._bus.publish_dlq_event(dlq_event)
-                    successfully_published_dlq_events.append(original_event)
+                    successfully_published_dlq_events.append(exhausted_event)
                 except Exception:
                     logger.exception("Failed to publish DLQ event: actor=%s", state.actor_key)
+                    retried_events.append(exhausted_event)
             await self._ack_events(successfully_published_dlq_events)
+        else:
+            retried_events.extend(exhausted_event for exhausted_event, _ in exhausted_events)
 
         async with state.lock:
             if state.generation_version == turn_version:
@@ -509,7 +536,7 @@ class InboundActorService:
 
     async def _ack_events(self, events: Sequence[InboundActorEvent]) -> None:
         if self._bus is None:
-            return
+            return self._mark_events_processed(events)
 
         message_ids = list(
             dict.fromkeys(
@@ -518,9 +545,51 @@ class InboundActorService:
                 if str(event.source_message_id or "").strip()
             )
         )
+        if not self._mark_events_processed(events):
+            return False
         if not message_ids:
-            return
-        await self._bus.ack(*message_ids)
+            return True
+        try:
+            await self._bus.ack(*message_ids)
+        except Exception as exc:
+            logger.warning("Inbound actor ack failed for %s: %s", message_ids, exc)
+            return False
+        return True
+
+    def _mark_events_processed(self, events: Sequence[InboundActorEvent]) -> bool:
+        if not events:
+            return True
+
+        db = self._session_factory()
+        now = datetime.now()
+        try:
+            for event in events:
+                record = (
+                    db.query(InboundEventDedup)
+                    .filter(
+                        InboundEventDedup.event_id == event.event_id,
+                        InboundEventDedup.actor_key == event.actor_key,
+                    )
+                    .first()
+                )
+                if record is None:
+                    db.add(
+                        InboundEventDedup(
+                            event_id=event.event_id,
+                            actor_key=event.actor_key,
+                            processed_at=now,
+                        )
+                    )
+                else:
+                    record.processed_at = now
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to mark inbound dedup events as processed")
+            return False
+        finally:
+            db.close()
 
     def _compute_retry_backoff_seconds(self, events: Sequence[InboundActorEvent]) -> float:
         if not events:

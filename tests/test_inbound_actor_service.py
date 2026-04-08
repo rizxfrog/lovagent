@@ -16,6 +16,7 @@ class FakeRedisStreamBus:
         self.pending_messages: list[StreamEnvelope] = []
         self.acked: list[str] = []
         self.dlq_events: list[DlqActorEvent] = []
+        self.dlq_failures_remaining = 0
         self.reclaim_calls = 0
         self.read_calls = 0
         self.closed = False
@@ -51,6 +52,9 @@ class FakeRedisStreamBus:
         return len(message_ids)
 
     async def publish_dlq_event(self, dlq_event: DlqActorEvent) -> str:
+        if self.dlq_failures_remaining > 0:
+            self.dlq_failures_remaining -= 1
+            raise RuntimeError("dlq unavailable")
         self.dlq_events.append(dlq_event)
         return f"dlq-{len(self.dlq_events)}"
 
@@ -197,6 +201,22 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
                 occurred_at=datetime(2026, 4, 9, 12, 0, 0),
             ),
         )
+
+    def _save_dedup_record(self, *, event_id: str, actor_key: str, processed_at: datetime | None) -> None:
+        record = (
+            self.db.query(InboundEventDedup)
+            .filter(
+                InboundEventDedup.event_id == event_id,
+                InboundEventDedup.actor_key == actor_key,
+            )
+            .first()
+        )
+        if record is None:
+            record = InboundEventDedup(event_id=event_id, actor_key=actor_key, processed_at=processed_at)
+            self.db.add(record)
+        else:
+            record.processed_at = processed_at
+        self.db.commit()
 
     async def test_interrupt_generation_on_new_message(self):
         first_generation_started = asyncio.Event()
@@ -392,6 +412,8 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_recovery_path_processes_previously_unacked_entries(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"pending-user-{uuid4().hex[:8]}"
+        actor_key = InboundActorService.actor_key("wecom", external_user_id)
+        self._save_dedup_record(event_id="stream:9-0", actor_key=actor_key, processed_at=None)
         bus.pending_messages.append(
             self._envelope(
                 message_id="9-0",
@@ -415,9 +437,10 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(bus.reclaim_calls, 0)
         self.assertEqual(delivered_turns, [["stream:9-0"]])
 
-    async def test_duplicate_stream_message_is_acked_immediately(self):
+    async def test_duplicate_stream_message_with_processed_dedup_is_acked_immediately(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"dup-user-{uuid4().hex[:8]}"
+        actor_key = InboundActorService.actor_key("wecom", external_user_id)
         generated_turns: list[list[str]] = []
         delivered_turns: list[list[str]] = []
 
@@ -429,21 +452,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
             delivered_turns.append([event.event_id for event in turn.events])
 
         service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, bus=bus)
-        await service.enqueue_event(
-            InboundActorEvent(
-                event_id="evt-dup",
-                channel="wecom",
-                external_user_id=external_user_id,
-                payload={"text": "first"},
-            )
-        )
-        await self._wait_for_actor_idle(
-            service,
-            channel="wecom",
-            external_user_id=external_user_id,
-            min_deliveries=1,
-            delivered_turns=delivered_turns,
-        )
+        self._save_dedup_record(event_id="evt-dup", actor_key=actor_key, processed_at=datetime.now())
 
         bus.pending_messages.append(
             self._envelope(
@@ -458,9 +467,47 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._wait_for(lambda: bus.acked == ["10-0"])
         await asyncio.sleep(0.05)
 
-        self.assertEqual(generated_turns, [["evt-dup"]])
-        self.assertEqual(delivered_turns, [["evt-dup"]])
+        self.assertEqual(generated_turns, [])
+        self.assertEqual(delivered_turns, [])
         self.assertEqual(bus.acked, ["10-0"])
+
+    async def test_dlq_publish_failure_retries_until_publish_succeeds_then_acks(self):
+        bus = FakeRedisStreamBus()
+        bus.dlq_failures_remaining = 1
+        external_user_id = f"dlq-fail-user-{uuid4().hex[:8]}"
+        event = InboundActorEvent(
+            event_id="evt-dlq-fail",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "retry dlq"},
+            source_message_id="20-0",
+        )
+        attempt_times: list[float] = []
+
+        async def generate_reply(turn):
+            attempt_times.append(asyncio.get_running_loop().time())
+            raise RuntimeError("boom")
+
+        async def deliver_reply(turn, reply):
+            self.fail("delivery should not run when generation keeps failing")
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=0,
+            retry_backoff_base_ms=50,
+            bus=bus,
+        )
+        await service.enqueue_event(event)
+        await self._wait_for_actor_quiescent(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+        )
+
+        self.assertEqual(len(bus.dlq_events), 1)
+        self.assertEqual(bus.acked, ["20-0"])
+        self.assertGreaterEqual(len(attempt_times), 2)
 
     async def test_concurrent_first_enqueue_does_not_create_duplicate_runtime_state(self):
         suffix = uuid4().hex[:8]

@@ -40,7 +40,7 @@ class InboundEventDedup(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String(128), nullable=False, comment="Inbound event id")
     actor_key = Column(String(160), nullable=False, comment="Actor identity key")
-    processed_at = Column(DateTime, nullable=False, default=datetime.now, comment="Processed at")
+    processed_at = Column(DateTime, nullable=True, default=None, comment="Processed at")
 
     def __repr__(self):
         return f"<InboundEventDedup(id={self.id}, event_id={self.event_id}, actor_key={self.actor_key})>"

@@ -48,6 +48,7 @@ def _run_compat_migrations() -> None:
     with engine.begin() as conn:
         _ensure_users_channel_columns(inspector, conn)
         _ensure_proactive_channel_columns(inspector, conn)
+        _ensure_inbound_event_dedup_processed_at_nullable(inspector, conn)
 
 
 def _ensure_users_channel_columns(inspector, conn) -> None:
@@ -104,6 +105,56 @@ def _ensure_proactive_channel_columns(inspector, conn) -> None:
                     )
                 )
         conn.execute(text("UPDATE proactive_chat_logs SET target_channel = 'wecom' WHERE target_channel IS NULL OR target_channel = ''"))
+
+
+def _ensure_inbound_event_dedup_processed_at_nullable(inspector, conn) -> None:
+    tables = inspector.get_table_names()
+    if "inbound_event_dedup" not in tables:
+        return
+
+    processed_at_column = None
+    for item in inspector.get_columns("inbound_event_dedup"):
+        if item["name"] == "processed_at":
+            processed_at_column = item
+            break
+
+    if not processed_at_column or processed_at_column.get("nullable", True):
+        return
+
+    dialect_name = engine.dialect.name
+    if dialect_name == "sqlite":
+        conn.execute(
+            text(
+                """
+                CREATE TABLE inbound_event_dedup__new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id VARCHAR(128) NOT NULL,
+                    actor_key VARCHAR(160) NOT NULL,
+                    processed_at DATETIME NULL,
+                    CONSTRAINT uq_inbound_event_dedup_event_id_actor_key UNIQUE (event_id, actor_key)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO inbound_event_dedup__new (id, event_id, actor_key, processed_at)
+                SELECT id, event_id, actor_key, processed_at
+                FROM inbound_event_dedup
+                """
+            )
+        )
+        conn.execute(text("DROP TABLE inbound_event_dedup"))
+        conn.execute(text("ALTER TABLE inbound_event_dedup__new RENAME TO inbound_event_dedup"))
+        return
+
+    if dialect_name == "postgresql":
+        conn.execute(text("ALTER TABLE inbound_event_dedup ALTER COLUMN processed_at DROP NOT NULL"))
+        return
+
+    if dialect_name in {"mysql", "mariadb"}:
+        conn.execute(text("ALTER TABLE inbound_event_dedup MODIFY processed_at DATETIME NULL"))
 
 
 def get_db():
