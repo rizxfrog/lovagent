@@ -52,6 +52,22 @@ from app.services.llm_service import GLMService
 
 
 class GLMServiceTests(unittest.TestCase):
+    @staticmethod
+    def _glm_config(**overrides):
+        config = {
+            "model_provider": "glm",
+            "zhipu_api_key": "test-key",
+            "zhipu_model": "glm-5",
+            "zhipu_thinking_type": "disabled",
+            "zhipu_base_url": "https://example.com",
+            "zhipu_web_search_enabled": True,
+            "zhipu_web_search_engine": "search_std",
+            "zhipu_web_search_count": 4,
+            "zhipu_web_search_content_size": "medium",
+        }
+        config.update(overrides)
+        return config
+
     def test_chat_completion_retries_when_only_reasoning_is_returned(self):
         service = GLMService()
 
@@ -82,7 +98,10 @@ class GLMServiceTests(unittest.TestCase):
 
         mocked_request = AsyncMock(side_effect=[first_result, second_result])
 
-        with patch.object(service, "_request_completion", mocked_request):
+        with (
+            patch.object(service, "_current_config", return_value=self._glm_config()),
+            patch.object(service, "_request_completion", mocked_request),
+        ):
             response = asyncio.run(
                 service.chat_completion(
                     messages=[{"role": "user", "content": "hello"}],
@@ -151,11 +170,14 @@ class GLMServiceTests(unittest.TestCase):
     def test_web_search_uses_documented_payload_fields(self):
         service = GLMService()
 
-        with patch.object(
-            service,
-            "_request_web_search",
-            AsyncMock(return_value={"search_result": []}),
-        ) as mocked_request:
+        with (
+            patch.object(service, "_current_config", return_value=self._glm_config()),
+            patch.object(
+                service,
+                "_request_web_search",
+                AsyncMock(return_value={"search_result": []}),
+            ) as mocked_request,
+        ):
             asyncio.run(service.web_search("What is AlphaFold?"))
 
         payload = mocked_request.await_args.args[0]
