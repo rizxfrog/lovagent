@@ -163,6 +163,86 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertTrue(payload["current"]["multimodal_configured"])
             self.assertTrue(payload["current"]["has_openai_api_key"])
 
+    def test_effective_actor_config_prefers_runtime_values_and_normalizes_bounds(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "redis_url", "redis://env.example.com:6379/0"),
+            patch.object(settings, "redis_password", "env-secret"),
+            patch.object(settings, "actor_pipeline_enabled", True),
+            patch.object(settings, "actor_debounce_ms", 2400),
+            patch.object(settings, "actor_max_messages_per_turn", 10),
+            patch.object(settings, "actor_first_reply_delay_ms", 300),
+            patch.object(settings, "actor_chunk_delay_ms", 200),
+            patch.object(settings, "actor_reply_chunk_min", 1),
+            patch.object(settings, "actor_reply_chunk_max", 5),
+            patch.object(settings, "actor_retry_max_attempts", 3),
+            patch.object(settings, "actor_retry_backoff_base_ms", 300),
+        ):
+            runtime_config_service.save_section(
+                "channels_actor",
+                {
+                    "actor_pipeline_enabled": False,
+                    "actor_debounce_ms": -50,
+                    "actor_max_messages_per_turn": 0,
+                    "actor_first_reply_delay_ms": 120,
+                    "actor_chunk_delay_ms": 80,
+                    "actor_reply_chunk_min": 0,
+                    "actor_reply_chunk_max": 0,
+                    "actor_retry_max_attempts": -2,
+                    "actor_retry_backoff_base_ms": 150,
+                },
+            )
+
+            effective_actor = runtime_config_service.get_effective_actor_config()
+
+            self.assertEqual(effective_actor["redis_url"], "redis://env.example.com:6379/0")
+            self.assertEqual(effective_actor["redis_password"], "env-secret")
+            self.assertFalse(effective_actor["actor_pipeline_enabled"])
+            self.assertEqual(effective_actor["actor_debounce_ms"], 0)
+            self.assertEqual(effective_actor["actor_max_messages_per_turn"], 1)
+            self.assertEqual(effective_actor["actor_first_reply_delay_ms"], 120)
+            self.assertEqual(effective_actor["actor_chunk_delay_ms"], 80)
+            self.assertEqual(effective_actor["actor_reply_chunk_min"], 1)
+            self.assertEqual(effective_actor["actor_reply_chunk_max"], 1)
+            self.assertEqual(effective_actor["actor_retry_max_attempts"], 0)
+            self.assertEqual(effective_actor["actor_retry_backoff_base_ms"], 150)
+
+    def test_actor_config_uses_env_defaults_when_runtime_values_missing(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "redis_url", "redis://127.0.0.1:6379/1"),
+            patch.object(settings, "redis_password", "runtime-fallback"),
+            patch.object(settings, "actor_pipeline_enabled", False),
+            patch.object(settings, "actor_debounce_ms", 2600),
+            patch.object(settings, "actor_max_messages_per_turn", 12),
+            patch.object(settings, "actor_first_reply_delay_ms", 320),
+            patch.object(settings, "actor_chunk_delay_ms", 180),
+            patch.object(settings, "actor_reply_chunk_min", 2),
+            patch.object(settings, "actor_reply_chunk_max", 6),
+            patch.object(settings, "actor_retry_max_attempts", 4),
+            patch.object(settings, "actor_retry_backoff_base_ms", 450),
+        ):
+            effective_actor = runtime_config_service.get_effective_actor_config()
+
+            self.assertEqual(
+                effective_actor,
+                {
+                    "redis_url": "redis://127.0.0.1:6379/1",
+                    "redis_password": "runtime-fallback",
+                    "actor_pipeline_enabled": False,
+                    "actor_debounce_ms": 2600,
+                    "actor_max_messages_per_turn": 12,
+                    "actor_first_reply_delay_ms": 320,
+                    "actor_chunk_delay_ms": 180,
+                    "actor_reply_chunk_min": 2,
+                    "actor_reply_chunk_max": 6,
+                    "actor_retry_max_attempts": 4,
+                    "actor_retry_backoff_base_ms": 450,
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

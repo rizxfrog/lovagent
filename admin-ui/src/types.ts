@@ -111,6 +111,20 @@ export type ProactiveChatResponse = {
   };
 };
 
+export type ActorSettingsConfig = {
+  redis_url: string;
+  redis_password: string;
+  actor_pipeline_enabled: boolean;
+  actor_debounce_ms: number;
+  actor_max_messages_per_turn: number;
+  actor_first_reply_delay_ms: number;
+  actor_chunk_delay_ms: number;
+  actor_reply_chunk_min: number;
+  actor_reply_chunk_max: number;
+  actor_retry_max_attempts: number;
+  actor_retry_backoff_base_ms: number;
+};
+
 export type SetupModelProvider = "zhipu" | "openai" | "qwen" | "deepseek";
 
 export type SetupModelRouting = {

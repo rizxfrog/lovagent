@@ -1,18 +1,19 @@
 import unittest
+from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
-from app.models.admin import AgentConfig, ProactiveChatConfig, ProactiveChatLog
+from app.models.admin import AgentConfig, ProactiveChatConfig, ProactiveChatLog, RuntimeConfig
 from app.models.database import SessionLocal
 from app.models.database import init_db
 from app.models.user import User
 from app.prompts.templates import build_dynamic_prompt, build_proactive_prompt
 from app.services.persona_service import DEFAULT_PERSONA_CONFIG_KEY
 from app.services.proactive_chat_service import DEFAULT_PROACTIVE_CHAT_CONFIG_KEY
-from app.services.runtime_config_service import runtime_config_service
+from app.services.runtime_config_service import RUNTIME_CONFIG_KEY, runtime_config_service
 
 
 class AdminApiTests(unittest.TestCase):
@@ -55,6 +56,14 @@ class AdminApiTests(unittest.TestCase):
             }
         else:
             self.original_proactive_snapshot = None
+        self.original_runtime_config = (
+            self.db.query(RuntimeConfig)
+            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+            .first()
+        )
+        self.original_runtime_config_snapshot = (
+            deepcopy(self.original_runtime_config.config_value) if self.original_runtime_config else None
+        )
         self.client = TestClient(app)
         self.password_patcher = patch.object(settings, "admin_password", "test-admin")
         self.password_patcher.start()
@@ -118,6 +127,23 @@ class AdminApiTests(unittest.TestCase):
         elif current_proactive:
             self.db.delete(current_proactive)
             self.db.commit()
+
+        current_runtime_config = (
+            self.db.query(RuntimeConfig)
+            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+            .first()
+        )
+        if self.original_runtime_config_snapshot is not None:
+            if not current_runtime_config:
+                current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY)
+                self.db.add(current_runtime_config)
+            current_runtime_config.config_value = deepcopy(self.original_runtime_config_snapshot)
+            self.db.commit()
+            runtime_config_service.invalidate_cache()
+        elif current_runtime_config:
+            self.db.delete(current_runtime_config)
+            self.db.commit()
+            runtime_config_service.invalidate_cache()
 
         self.db.query(ProactiveChatLog).filter(ProactiveChatLog.target_wecom_user_id.in_(["test-user", "user-1"])).delete(
             synchronize_session=False
@@ -231,7 +257,7 @@ class AdminApiTests(unittest.TestCase):
         payload = {"user_message": "AlphaFold 是什么"}
 
         with patch(
-            "app.routers.admin.glm_service.maybe_collect_web_context",
+            "app.graph.tools.search.web_search_service.maybe_collect_web_context",
             AsyncMock(
                 return_value={
                     "triggered": True,
@@ -359,6 +385,58 @@ class AdminApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["delivery"]["status"], "sent")
+
+    def test_actor_settings_roundtrip(self):
+        self.login()
+
+        with (
+            patch.object(settings, "redis_url", "redis://env.example.com:6379/0"),
+            patch.object(settings, "redis_password", "env-secret"),
+            patch.object(settings, "actor_pipeline_enabled", True),
+            patch.object(settings, "actor_debounce_ms", 2400),
+            patch.object(settings, "actor_max_messages_per_turn", 10),
+            patch.object(settings, "actor_first_reply_delay_ms", 300),
+            patch.object(settings, "actor_chunk_delay_ms", 200),
+            patch.object(settings, "actor_reply_chunk_min", 1),
+            patch.object(settings, "actor_reply_chunk_max", 5),
+            patch.object(settings, "actor_retry_max_attempts", 3),
+            patch.object(settings, "actor_retry_backoff_base_ms", 300),
+        ):
+            get_response = self.client.get("/admin-api/actor-settings")
+            self.assertEqual(get_response.status_code, 200)
+            self.assertEqual(get_response.json()["redis_url"], "redis://env.example.com:6379/0")
+            self.assertEqual(get_response.json()["actor_reply_chunk_max"], 5)
+
+            payload = {
+                "redis_url": "redis://runtime.example.com:6379/2",
+                "redis_password": "runtime-secret",
+                "actor_pipeline_enabled": False,
+                "actor_debounce_ms": -100,
+                "actor_max_messages_per_turn": 0,
+                "actor_first_reply_delay_ms": 150,
+                "actor_chunk_delay_ms": 90,
+                "actor_reply_chunk_min": 0,
+                "actor_reply_chunk_max": 0,
+                "actor_retry_max_attempts": -3,
+                "actor_retry_backoff_base_ms": 120,
+            }
+
+            save_response = self.client.put("/admin-api/actor-settings", json=payload)
+            self.assertEqual(save_response.status_code, 200)
+            saved = save_response.json()
+
+            self.assertEqual(saved["redis_url"], "redis://runtime.example.com:6379/2")
+            self.assertEqual(saved["redis_password"], "runtime-secret")
+            self.assertFalse(saved["actor_pipeline_enabled"])
+            self.assertEqual(saved["actor_debounce_ms"], 0)
+            self.assertEqual(saved["actor_max_messages_per_turn"], 1)
+            self.assertEqual(saved["actor_reply_chunk_min"], 1)
+            self.assertEqual(saved["actor_reply_chunk_max"], 1)
+            self.assertEqual(saved["actor_retry_max_attempts"], 0)
+
+            roundtrip_response = self.client.get("/admin-api/actor-settings")
+            self.assertEqual(roundtrip_response.status_code, 200)
+            self.assertEqual(roundtrip_response.json(), saved)
 
 
 class PromptCompositionTests(unittest.TestCase):

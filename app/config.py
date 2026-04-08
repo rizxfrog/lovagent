@@ -58,7 +58,18 @@ class Settings(BaseSettings):
     server_port: int = int(os.getenv("SERVER_PORT", "8000"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "")
+    redis_url: str = os.getenv("REDIS_URL", "")
+    redis_password: str = os.getenv("REDIS_PASSWORD", "")
     proactive_scheduler_interval_seconds: int = int(os.getenv("PROACTIVE_SCHEDULER_INTERVAL_SECONDS", "60"))
+    actor_pipeline_enabled: bool = os.getenv("ACTOR_PIPELINE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    actor_debounce_ms: int = int(os.getenv("ACTOR_DEBOUNCE_MS", "2400"))
+    actor_max_messages_per_turn: int = int(os.getenv("ACTOR_MAX_MESSAGES_PER_TURN", "10"))
+    actor_first_reply_delay_ms: int = int(os.getenv("ACTOR_FIRST_REPLY_DELAY_MS", "300"))
+    actor_chunk_delay_ms: int = int(os.getenv("ACTOR_CHUNK_DELAY_MS", "200"))
+    actor_reply_chunk_min: int = int(os.getenv("ACTOR_REPLY_CHUNK_MIN", "1"))
+    actor_reply_chunk_max: int = int(os.getenv("ACTOR_REPLY_CHUNK_MAX", "5"))
+    actor_retry_max_attempts: int = int(os.getenv("ACTOR_RETRY_MAX_ATTEMPTS", "3"))
+    actor_retry_backoff_base_ms: int = int(os.getenv("ACTOR_RETRY_BACKOFF_BASE_MS", "300"))
     admin_dev_origins_raw: str = os.getenv(
         "ADMIN_DEV_ORIGINS",
         "http://127.0.0.1:5173,http://localhost:5173",

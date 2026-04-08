@@ -18,13 +18,10 @@ from app.services.provider_catalog import get_provider_preset, infer_provider_id
 
 RUNTIME_CONFIG_KEY = "setup_runtime_config"
 CONFIG_CACHE_TTL_SECONDS = 2.0
-_ENV_MODEL_PROVIDER = str(settings.model_provider or "glm").strip().lower()
-_DEFAULT_PROVIDER_ID = "openai" if _ENV_MODEL_PROVIDER in {"openai", "openai_compatible"} else "zhipu"
-_DEFAULT_MODEL_PROVIDER = "openai" if _DEFAULT_PROVIDER_ID == "openai" else "glm"
 
 DEFAULT_RUNTIME_CONFIG = {
     "model": {
-        "provider_id": _DEFAULT_PROVIDER_ID,
+        "provider_id": "zhipu",
         "provider_api_key": "",
         "provider_base_url": "",
         "text_model_override": "",
@@ -33,7 +30,7 @@ DEFAULT_RUNTIME_CONFIG = {
         "search_provider_mode": "tavily_primary_exa_fallback",
         "tavily_api_key": "",
         "exa_api_key": "",
-        "model_provider": _DEFAULT_MODEL_PROVIDER,
+        "model_provider": "glm",
         "zhipu_api_key": "",
         "zhipu_model": "glm-5",
         "zhipu_thinking_type": "disabled",
@@ -66,6 +63,19 @@ DEFAULT_RUNTIME_CONFIG = {
     "admin": {
         "password": "",
     },
+    "channels_actor": {
+        "redis_url": "",
+        "redis_password": "",
+        "actor_pipeline_enabled": None,
+        "actor_debounce_ms": None,
+        "actor_max_messages_per_turn": None,
+        "actor_first_reply_delay_ms": None,
+        "actor_chunk_delay_ms": None,
+        "actor_reply_chunk_min": None,
+        "actor_reply_chunk_max": None,
+        "actor_retry_max_attempts": None,
+        "actor_retry_backoff_base_ms": None,
+    },
 }
 
 
@@ -77,11 +87,35 @@ class RuntimeConfigService:
         self._cached_config: Optional[Dict] = None
         self._cache_expire_at: float = 0.0
 
-    def _normalize_model_section(self, incoming: Dict | None) -> Dict:
+    @staticmethod
+    def _default_model_section() -> Dict:
         defaults = deepcopy(DEFAULT_RUNTIME_CONFIG["model"])
-        source = incoming if isinstance(incoming, dict) else {}
+        defaults["openai_base_url"] = settings.openai_base_url
+        defaults["openai_model"] = settings.openai_model
+        return defaults
 
-        defaults["provider_id"] = str(source.get("provider_id", defaults["provider_id"]) or defaults["provider_id"])
+    def _build_default_config(self) -> Dict:
+        config = deepcopy(DEFAULT_RUNTIME_CONFIG)
+        config["model"] = self._default_model_section()
+        config["channels_actor"] = self._normalize_actor_section({})
+        return config
+
+    def _normalize_model_section(self, incoming: Dict | None) -> Dict:
+        defaults = self._default_model_section()
+        source = incoming if isinstance(incoming, dict) else {}
+        model_provider = str(source.get("model_provider", defaults["model_provider"]) or defaults["model_provider"]).strip()
+        provider_id = source.get("provider_id")
+        if model_provider:
+            provider_id = None
+
+        defaults["provider_id"] = infer_provider_id(
+            {
+                "provider_id": provider_id,
+                "model_provider": model_provider,
+                "provider_base_url": source.get("provider_base_url", defaults["provider_base_url"]),
+                "openai_base_url": source.get("openai_base_url", defaults["openai_base_url"]),
+            }
+        )
         defaults["provider_api_key"] = str(source.get("provider_api_key", defaults["provider_api_key"]) or "")
         defaults["provider_base_url"] = str(source.get("provider_base_url", defaults["provider_base_url"]) or "")
         defaults["text_model_override"] = str(source.get("text_model_override", defaults["text_model_override"]) or "")
@@ -92,7 +126,7 @@ class RuntimeConfigService:
         defaults["search_provider_mode"] = str(source.get("search_provider_mode", defaults["search_provider_mode"]) or defaults["search_provider_mode"])
         defaults["tavily_api_key"] = str(source.get("tavily_api_key", defaults["tavily_api_key"]) or "")
         defaults["exa_api_key"] = str(source.get("exa_api_key", defaults["exa_api_key"]) or "")
-        defaults["model_provider"] = str(source.get("model_provider", defaults["model_provider"]) or defaults["model_provider"])
+        defaults["model_provider"] = model_provider
         defaults["zhipu_api_key"] = str(source.get("zhipu_api_key", defaults["zhipu_api_key"]) or "")
         defaults["zhipu_model"] = str(source.get("zhipu_model", defaults["zhipu_model"]) or defaults["zhipu_model"])
         defaults["zhipu_thinking_type"] = str(
@@ -117,6 +151,83 @@ class RuntimeConfigService:
         }
         return defaults
 
+    @staticmethod
+    def _coerce_optional_int(value: object, fallback: int | None = None) -> int | None:
+        if value is None or value == "":
+            return fallback
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _coerce_optional_bool(value: object, fallback: bool | None = None) -> bool | None:
+        if value is None or value == "":
+            return fallback
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        lowered = str(value).strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return fallback
+
+    def _normalize_actor_section(self, incoming: Dict | None) -> Dict:
+        defaults = deepcopy(DEFAULT_RUNTIME_CONFIG["channels_actor"])
+        source = incoming if isinstance(incoming, dict) else {}
+
+        defaults["redis_url"] = str(source.get("redis_url", defaults["redis_url"]) or "").strip()
+        defaults["redis_password"] = str(source.get("redis_password", defaults["redis_password"]) or "").strip()
+        defaults["actor_pipeline_enabled"] = self._coerce_optional_bool(
+            source.get("actor_pipeline_enabled"),
+            defaults["actor_pipeline_enabled"],
+        )
+        defaults["actor_debounce_ms"] = self._coerce_optional_int(source.get("actor_debounce_ms"), defaults["actor_debounce_ms"])
+        defaults["actor_max_messages_per_turn"] = self._coerce_optional_int(
+            source.get("actor_max_messages_per_turn"),
+            defaults["actor_max_messages_per_turn"],
+        )
+        defaults["actor_first_reply_delay_ms"] = self._coerce_optional_int(
+            source.get("actor_first_reply_delay_ms"),
+            defaults["actor_first_reply_delay_ms"],
+        )
+        defaults["actor_chunk_delay_ms"] = self._coerce_optional_int(
+            source.get("actor_chunk_delay_ms"),
+            defaults["actor_chunk_delay_ms"],
+        )
+        defaults["actor_reply_chunk_min"] = self._coerce_optional_int(
+            source.get("actor_reply_chunk_min"),
+            defaults["actor_reply_chunk_min"],
+        )
+        defaults["actor_reply_chunk_max"] = self._coerce_optional_int(
+            source.get("actor_reply_chunk_max"),
+            defaults["actor_reply_chunk_max"],
+        )
+        defaults["actor_retry_max_attempts"] = self._coerce_optional_int(
+            source.get("actor_retry_max_attempts"),
+            defaults["actor_retry_max_attempts"],
+        )
+        defaults["actor_retry_backoff_base_ms"] = self._coerce_optional_int(
+            source.get("actor_retry_backoff_base_ms"),
+            defaults["actor_retry_backoff_base_ms"],
+        )
+
+        if defaults["actor_debounce_ms"] is not None:
+            defaults["actor_debounce_ms"] = max(0, defaults["actor_debounce_ms"])
+        if defaults["actor_max_messages_per_turn"] is not None:
+            defaults["actor_max_messages_per_turn"] = max(1, defaults["actor_max_messages_per_turn"])
+        if defaults["actor_reply_chunk_min"] is not None:
+            defaults["actor_reply_chunk_min"] = max(1, defaults["actor_reply_chunk_min"])
+        if defaults["actor_reply_chunk_max"] is not None:
+            chunk_min = defaults["actor_reply_chunk_min"] if defaults["actor_reply_chunk_min"] is not None else 1
+            defaults["actor_reply_chunk_max"] = max(chunk_min, defaults["actor_reply_chunk_max"])
+        if defaults["actor_retry_max_attempts"] is not None:
+            defaults["actor_retry_max_attempts"] = max(0, defaults["actor_retry_max_attempts"])
+        return defaults
+
     def get_config(self) -> Dict:
         now = monotonic()
         with self._cache_lock:
@@ -132,21 +243,23 @@ class RuntimeConfigService:
                     .first()
                 )
             except OperationalError:
-                config = deepcopy(DEFAULT_RUNTIME_CONFIG)
+                config = self._build_default_config()
                 self._set_cache(config)
                 return deepcopy(config)
 
             if not record:
-                config = deepcopy(DEFAULT_RUNTIME_CONFIG)
+                config = self._build_default_config()
                 self._set_cache(config)
                 return deepcopy(config)
 
-            merged = deepcopy(DEFAULT_RUNTIME_CONFIG)
+            merged = self._build_default_config()
             value = record.config_value or {}
             for section, defaults in DEFAULT_RUNTIME_CONFIG.items():
                 incoming = value.get(section) if isinstance(value, dict) else {}
                 if section == "model":
                     merged[section] = self._normalize_model_section(incoming if isinstance(incoming, dict) else {})
+                elif section == "channels_actor":
+                    merged[section] = self._normalize_actor_section(incoming if isinstance(incoming, dict) else {})
                 elif isinstance(incoming, dict):
                     merged[section].update({key: incoming.get(key, fallback) for key, fallback in defaults.items()})
             self._set_cache(merged)
@@ -171,12 +284,16 @@ class RuntimeConfigService:
                 record = None
 
             if not record:
-                record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value=deepcopy(DEFAULT_RUNTIME_CONFIG))
+                record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value=self._build_default_config())
                 db.add(record)
 
-            current = deepcopy(record.config_value) if isinstance(record.config_value, dict) else deepcopy(DEFAULT_RUNTIME_CONFIG)
+            current = deepcopy(record.config_value) if isinstance(record.config_value, dict) else self._build_default_config()
             current.setdefault(section, {})
             current[section].update(payload)
+            if section == "model":
+                current[section] = self._normalize_model_section(current[section])
+            elif section == "channels_actor":
+                current[section] = self._normalize_actor_section(current[section])
             record.config_value = current
             flag_modified(record, "config_value")
             db.commit()
@@ -253,7 +370,7 @@ class RuntimeConfigService:
             multimodal_api_key = multimodal_api_key or str(settings.zhipu_multimodal_api_key or settings.zhipu_api_key or "").strip()
 
         multimodal_override = str(config.get("multimodal_model_override") or "").strip()
-        legacy_multimodal = str(config.get("multimodal_model") or "").strip() if provider_id == "zhipu" else ""
+        legacy_multimodal = str(config.get("multimodal_model") or "").strip()
         multimodal_model = ""
         if preset.supports_multimodal:
             multimodal_model = multimodal_override or legacy_multimodal or preset.default_multimodal_model
@@ -306,7 +423,7 @@ class RuntimeConfigService:
             "openai_api_key": provider_api_key if preset.transport == "openai_compatible" else (config["openai_api_key"] or settings.openai_api_key),
             "openai_base_url": provider_base_url if preset.transport == "openai_compatible" else (config["openai_base_url"] or settings.openai_base_url),
             "openai_model_mode": "auto",
-            "openai_model": text_model or settings.openai_model,
+            "openai_model": str(config.get("openai_model") or settings.openai_model or "").strip(),
             "openai_models": text_models,
         }
 
@@ -350,6 +467,72 @@ class RuntimeConfigService:
     def get_effective_admin_password(self) -> str:
         admin = self.get_config()["admin"]
         return str(admin.get("password") or settings.admin_password).strip()
+
+    def get_effective_actor_config(self) -> Dict:
+        actor = self.get_config()["channels_actor"]
+        actor_pipeline_enabled = (
+            settings.actor_pipeline_enabled
+            if actor.get("actor_pipeline_enabled") is None
+            else bool(actor.get("actor_pipeline_enabled"))
+        )
+        actor_debounce_ms = (
+            settings.actor_debounce_ms if actor.get("actor_debounce_ms") is None else int(actor["actor_debounce_ms"])
+        )
+        actor_max_messages_per_turn = (
+            settings.actor_max_messages_per_turn
+            if actor.get("actor_max_messages_per_turn") is None
+            else int(actor["actor_max_messages_per_turn"])
+        )
+        actor_first_reply_delay_ms = (
+            settings.actor_first_reply_delay_ms
+            if actor.get("actor_first_reply_delay_ms") is None
+            else int(actor["actor_first_reply_delay_ms"])
+        )
+        actor_chunk_delay_ms = (
+            settings.actor_chunk_delay_ms
+            if actor.get("actor_chunk_delay_ms") is None
+            else int(actor["actor_chunk_delay_ms"])
+        )
+        actor_reply_chunk_min = (
+            settings.actor_reply_chunk_min
+            if actor.get("actor_reply_chunk_min") is None
+            else int(actor["actor_reply_chunk_min"])
+        )
+        actor_reply_chunk_max = (
+            settings.actor_reply_chunk_max
+            if actor.get("actor_reply_chunk_max") is None
+            else int(actor["actor_reply_chunk_max"])
+        )
+        actor_retry_max_attempts = (
+            settings.actor_retry_max_attempts
+            if actor.get("actor_retry_max_attempts") is None
+            else int(actor["actor_retry_max_attempts"])
+        )
+        actor_retry_backoff_base_ms = (
+            settings.actor_retry_backoff_base_ms
+            if actor.get("actor_retry_backoff_base_ms") is None
+            else int(actor["actor_retry_backoff_base_ms"])
+        )
+
+        actor_debounce_ms = max(0, actor_debounce_ms)
+        actor_max_messages_per_turn = max(1, actor_max_messages_per_turn)
+        actor_reply_chunk_min = max(1, actor_reply_chunk_min)
+        actor_reply_chunk_max = max(actor_reply_chunk_min, actor_reply_chunk_max)
+        actor_retry_max_attempts = max(0, actor_retry_max_attempts)
+
+        return {
+            "redis_url": str(actor.get("redis_url") or settings.redis_url).strip(),
+            "redis_password": str(actor.get("redis_password") or settings.redis_password).strip(),
+            "actor_pipeline_enabled": actor_pipeline_enabled,
+            "actor_debounce_ms": actor_debounce_ms,
+            "actor_max_messages_per_turn": actor_max_messages_per_turn,
+            "actor_first_reply_delay_ms": actor_first_reply_delay_ms,
+            "actor_chunk_delay_ms": actor_chunk_delay_ms,
+            "actor_reply_chunk_min": actor_reply_chunk_min,
+            "actor_reply_chunk_max": actor_reply_chunk_max,
+            "actor_retry_max_attempts": actor_retry_max_attempts,
+            "actor_retry_backoff_base_ms": actor_retry_backoff_base_ms,
+        }
 
     def get_callback_url(self) -> str:
         public_base_url = self.get_effective_public_base_url()
@@ -417,12 +600,12 @@ class RuntimeConfigService:
                 "pdf_execution_mode": effective_model["pdf_execution_mode"],
                 "search_provider_mode": effective_model["search_provider_mode"],
                 "search_enabled": bool(effective_model["search_enabled"]),
-                "model_provider": effective_model["provider_id"],
+                "model_provider": effective_model["model_provider"],
                 "zhipu_model": effective_model["zhipu_model"],
                 "multimodal_model": effective_model["multimodal_model"],
                 "openai_model_mode": "auto",
                 "openai_base_url": effective_model["provider_base_url"],
-                "openai_model": effective_model["text_model"],
+                "openai_model": effective_model["openai_model"],
                 "openai_models": deepcopy(effective_model["text_models"]),
                 "public_base_url": effective_public_base_url,
                 "callback_url": self.get_callback_url(),

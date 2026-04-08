@@ -10,6 +10,7 @@ from app.config import settings
 from app.graph import run_preview_graph
 from app.schemas.admin import (
     AgentPersonaPayload,
+    ActorSettingsPayload,
     LoginRequest,
     PreviewRequest,
     ProactiveChatActionRequest,
@@ -78,6 +79,17 @@ async def update_persona(payload: AgentPersonaPayload, _: bool = Depends(require
 @router.get("/proactive-chat")
 async def get_proactive_chat(_: bool = Depends(require_admin)):
     return proactive_chat_service.get_config()
+
+
+@router.get("/actor-settings")
+async def get_actor_settings(_: bool = Depends(require_admin)):
+    return runtime_config_service.get_effective_actor_config()
+
+
+@router.put("/actor-settings")
+async def update_actor_settings(payload: ActorSettingsPayload, _: bool = Depends(require_admin)):
+    runtime_config_service.save_section("channels_actor", payload.model_dump())
+    return runtime_config_service.get_effective_actor_config()
 
 
 @router.put("/proactive-chat")
