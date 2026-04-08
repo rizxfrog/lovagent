@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime
 import unittest
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from app.models.actor import ActorInflightState, InboundEventDedup
@@ -158,6 +159,10 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         deliver_reply,
         debounce_ms: int = 0,
         max_messages_per_turn: int = 10,
+        first_reply_delay_ms: int = 0,
+        chunk_delay_ms: int = 0,
+        reply_chunk_min: int = 1,
+        reply_chunk_max: int = 1,
         retry_max_attempts: int = 0,
         retry_backoff_base_ms: int = 0,
         bus=None,
@@ -170,10 +175,10 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "actor_pipeline_enabled": True,
                 "actor_debounce_ms": debounce_ms,
                 "actor_max_messages_per_turn": max_messages_per_turn,
-                "actor_first_reply_delay_ms": 0,
-                "actor_chunk_delay_ms": 0,
-                "actor_reply_chunk_min": 1,
-                "actor_reply_chunk_max": 1,
+                "actor_first_reply_delay_ms": first_reply_delay_ms,
+                "actor_chunk_delay_ms": chunk_delay_ms,
+                "actor_reply_chunk_min": reply_chunk_min,
+                "actor_reply_chunk_max": reply_chunk_max,
                 "actor_retry_max_attempts": retry_max_attempts,
                 "actor_retry_backoff_base_ms": retry_backoff_base_ms,
                 "redis_url": "",
@@ -335,6 +340,55 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(delivered_replies, [("fresh-reply", ["evt-1", "evt-2"])])
+
+    async def test_stale_version_guard_stops_remaining_chunks(self):
+        bus = FakeRedisStreamBus()
+        sent_chunks: list[str] = []
+        first_chunk_sent = asyncio.Event()
+        external_user_id = f"chunk-stale-user-{uuid4().hex[:8]}"
+
+        async def generate_reply(turn):
+            return "first sentence. second sentence. third sentence."
+
+        async def deliver_reply(turn, reply):
+            return await InboundActorService._default_deliver_reply(service, turn, reply)
+
+        async def fake_send_text(channel: str, external_user_id: str, content: str):
+            sent_chunks.append(content)
+            if len(sent_chunks) == 1:
+                first_chunk_sent.set()
+            return {"channel": channel, "status": "sent"}
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            chunk_delay_ms=30,
+            reply_chunk_min=3,
+            reply_chunk_max=3,
+            bus=bus,
+        )
+        event = InboundActorEvent(
+            event_id="evt-chunk-stale",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "hello"},
+            source_message_id="30-0",
+        )
+
+        with patch("app.services.inbound_actor_service.channel_dispatcher.send_text", AsyncMock(side_effect=fake_send_text)):
+            await service.enqueue_event(event)
+            await self._wait_for(first_chunk_sent.is_set)
+            state = service._actors[service.actor_key("wecom", external_user_id)]
+            async with state.lock:
+                state.generation_version += 1
+            await self._wait_for_actor_quiescent(
+                service,
+                channel="wecom",
+                external_user_id=external_user_id,
+            )
+
+        self.assertEqual(len(sent_chunks), 1)
+        self.assertEqual(bus.acked, [])
 
     async def test_ack_occurs_after_successful_processing_not_at_enqueue(self):
         bus = FakeRedisStreamBus()

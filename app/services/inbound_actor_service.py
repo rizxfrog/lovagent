@@ -20,6 +20,7 @@ from app.graph import run_preview_graph
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal
 from app.services.channel_dispatcher import channel_dispatcher
+from app.services.llm_service import glm_service
 from app.services.redis_stream_bus import DlqActorEvent, InboundActorEvent, RedisStreamBus, StreamEnvelope
 from app.services.runtime_config_service import runtime_config_service
 
@@ -238,6 +239,13 @@ class InboundActorService:
         config = dict(self._config_loader())
         config["actor_debounce_ms"] = max(0, int(config.get("actor_debounce_ms") or 0))
         config["actor_max_messages_per_turn"] = max(1, int(config.get("actor_max_messages_per_turn") or 1))
+        config["actor_first_reply_delay_ms"] = max(0, int(config.get("actor_first_reply_delay_ms") or 0))
+        config["actor_chunk_delay_ms"] = max(0, int(config.get("actor_chunk_delay_ms") or 0))
+        config["actor_reply_chunk_min"] = max(1, int(config.get("actor_reply_chunk_min") or 1))
+        config["actor_reply_chunk_max"] = max(
+            int(config["actor_reply_chunk_min"]),
+            int(config.get("actor_reply_chunk_max") or config["actor_reply_chunk_min"] or 1),
+        )
         config["actor_retry_max_attempts"] = max(0, int(config.get("actor_retry_max_attempts") or 0))
         config["actor_retry_backoff_base_ms"] = max(0, int(config.get("actor_retry_backoff_base_ms") or 0))
         return config
@@ -468,8 +476,8 @@ class InboundActorService:
                 state.delivery_task = delivery_task
             delivered = False
             try:
-                await delivery_task
-                delivered = True
+                delivery_result = await delivery_task
+                delivered = self._delivery_completed(delivery_result)
             except asyncio.CancelledError:
                 pass
             finally:
@@ -630,6 +638,15 @@ class InboundActorService:
         exponent = max(0, min(consecutive_failures - 1, 4))
         return (base_ms * (2**exponent)) / 1000.0
 
+    @staticmethod
+    def _delivery_completed(delivery_result: object) -> bool:
+        if isinstance(delivery_result, dict):
+            return str(delivery_result.get("status") or "").strip().lower() == "sent"
+        status = getattr(delivery_result, "status", None)
+        if isinstance(status, str):
+            return status.strip().lower() == "sent"
+        return True
+
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:
         user_message = self._merge_user_message(turn.events)
         preview = await run_preview_graph(
@@ -643,7 +660,29 @@ class InboundActorService:
         return str(preview.get("reply") or "").strip()
 
     async def _default_deliver_reply(self, turn: InboundActorTurn, reply: str) -> object:
-        return await channel_dispatcher.send_text(turn.channel, turn.external_user_id, reply)
+        config = self._current_config()
+        chunks = glm_service.plan_reply_chunks(
+            reply,
+            chunk_min=int(config["actor_reply_chunk_min"]),
+            chunk_max=int(config["actor_reply_chunk_max"]),
+        )
+        return await channel_dispatcher.send_text_chunks(
+            turn.channel,
+            turn.external_user_id,
+            chunks,
+            first_delay_ms=int(config["actor_first_reply_delay_ms"]),
+            chunk_delay_ms=int(config["actor_chunk_delay_ms"]),
+            should_continue=self._build_delivery_guard(turn),
+        )
+
+    def _build_delivery_guard(self, turn: InboundActorTurn):
+        def guard() -> bool:
+            state = self._actors.get(turn.actor_key)
+            if state is None:
+                return False
+            return not self._stopping and state.generation_version == turn.generation_version
+
+        return guard
 
     @staticmethod
     def _merge_user_message(events: Sequence[InboundActorEvent]) -> str:

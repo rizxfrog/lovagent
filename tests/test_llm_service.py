@@ -61,7 +61,7 @@ class GLMServiceTests(unittest.TestCase):
                     "finish_reason": "length",
                     "message": {
                         "content": "",
-                        "reasoning_content": "先思考，正文还没来得及输出。",
+                        "reasoning_content": "still thinking",
                         "role": "assistant",
                     },
                 }
@@ -72,8 +72,8 @@ class GLMServiceTests(unittest.TestCase):
                 {
                     "finish_reason": "stop",
                     "message": {
-                        "content": "你好呀",
-                        "reasoning_content": "略",
+                        "content": "hello there",
+                        "reasoning_content": "done",
                         "role": "assistant",
                     },
                 }
@@ -85,33 +85,33 @@ class GLMServiceTests(unittest.TestCase):
         with patch.object(service, "_request_completion", mocked_request):
             response = asyncio.run(
                 service.chat_completion(
-                    messages=[{"role": "user", "content": "你好"}],
+                    messages=[{"role": "user", "content": "hello"}],
                     max_tokens=20,
                 )
             )
 
-        self.assertEqual(response, "你好呀")
+        self.assertEqual(response, "hello there")
         self.assertEqual(mocked_request.await_count, 2)
         retry_payload = mocked_request.await_args_list[1].args[0]
         self.assertGreaterEqual(retry_payload["max_tokens"], 512)
 
     def test_chat_with_context_passes_top_p(self):
         service = GLMService()
-        mocked_completion = AsyncMock(return_value="你好呀")
+        mocked_completion = AsyncMock(return_value="hello there")
 
         with patch.object(service, "chat_completion", mocked_completion):
             response = asyncio.run(
                 service.chat_with_context(
-                    system_prompt="你是女朋友",
-                    user_message="在吗",
-                    context_messages=[{"role": "assistant", "content": "在呀"}],
+                    system_prompt="you are a partner",
+                    user_message="are you there?",
+                    context_messages=[{"role": "assistant", "content": "yes"}],
                     temperature=0.88,
                     top_p=0.95,
                     max_tokens=64,
                 )
             )
 
-        self.assertEqual(response, "你好呀")
+        self.assertEqual(response, "hello there")
         kwargs = mocked_completion.await_args.kwargs
         self.assertEqual(kwargs["temperature"], 0.88)
         self.assertEqual(kwargs["top_p"], 0.95)
@@ -120,9 +120,9 @@ class GLMServiceTests(unittest.TestCase):
     def test_should_use_web_search_detects_concept_and_freshness_queries(self):
         service = GLMService()
 
-        self.assertTrue(service.should_use_web_search("AlphaFold 是什么"))
-        self.assertTrue(service.should_use_web_search("帮我查一下今天比特币价格"))
-        self.assertFalse(service.should_use_web_search("今天好想你呀"))
+        self.assertTrue(service.should_use_web_search("What is AlphaFold?"))
+        self.assertTrue(service.should_use_web_search("BTC price today?"))
+        self.assertFalse(service.should_use_web_search("just sharing that work ended and I am heading home now"))
 
     def test_maybe_collect_web_context_returns_results_when_triggered(self):
         service = GLMService()
@@ -135,17 +135,17 @@ class GLMServiceTests(unittest.TestCase):
                     {
                         "title": "AlphaFold - DeepMind",
                         "link": "https://example.com/alphafold",
-                        "content": "AlphaFold 是一个蛋白质结构预测系统。",
+                        "content": "AlphaFold predicts protein structures.",
                         "media": "DeepMind",
                         "publish_date": "2024-01-01",
                     }
                 ]
             ),
         ):
-            result = asyncio.run(service.maybe_collect_web_context("AlphaFold 是什么"))
+            result = asyncio.run(service.maybe_collect_web_context("What is AlphaFold?"))
 
         self.assertTrue(result["triggered"])
-        self.assertEqual(result["query"], "AlphaFold 是什么")
+        self.assertEqual(result["query"], "What is AlphaFold?")
         self.assertEqual(result["results"][0]["media"], "DeepMind")
 
     def test_web_search_uses_documented_payload_fields(self):
@@ -156,10 +156,10 @@ class GLMServiceTests(unittest.TestCase):
             "_request_web_search",
             AsyncMock(return_value={"search_result": []}),
         ) as mocked_request:
-            asyncio.run(service.web_search("AlphaFold 是什么"))
+            asyncio.run(service.web_search("What is AlphaFold?"))
 
         payload = mocked_request.await_args.args[0]
-        self.assertEqual(payload["search_query"], "AlphaFold 是什么")
+        self.assertEqual(payload["search_query"], "What is AlphaFold?")
         self.assertIn("count", payload)
         self.assertNotIn("search_count", payload)
         self.assertEqual(payload["search_intent"], False)
@@ -170,24 +170,24 @@ class GLMServiceTests(unittest.TestCase):
         parsed = service._parse_memory_extraction_result(
             """```json
             {
-              "identity_facts": [{"key": "work_type", "value": "设计师", "confidence": 0.9, "keywords": ["设计师"]}],
+              "identity_facts": [{"key": "work_type", "value": "designer", "confidence": 0.9, "keywords": ["designer"]}],
               "preferences": [],
-              "worries": [{"content": "最近有点焦虑", "confidence": 0.8, "keywords": ["焦虑"]}],
+              "worries": [{"content": "feeling stressed", "confidence": 0.8, "keywords": ["stress"]}],
               "milestones": [],
               "taboos": [],
-              "followups": [{"content": "明天复盘", "confidence": 0.7, "keywords": ["明天"]}],
-              "short_term_summary": "最近有点焦虑，明天要复盘。",
-              "emotion_trend": "焦虑",
-              "user_joys": ["今天下班早"]
+              "followups": [{"content": "check in tomorrow", "confidence": 0.7, "keywords": ["tomorrow"]}],
+              "short_term_summary": "stress today, follow up tomorrow",
+              "emotion_trend": "steady",
+              "user_joys": ["left work early"]
             }
             ```"""
         )
 
-        self.assertEqual(parsed["identity_facts"][0]["value"], "设计师")
-        self.assertEqual(parsed["worries"][0]["content"], "最近有点焦虑")
-        self.assertEqual(parsed["followups"][0]["content"], "明天复盘")
-        self.assertEqual(parsed["emotion_trend"], "焦虑")
-        self.assertEqual(parsed["user_joys"], ["今天下班早"])
+        self.assertEqual(parsed["identity_facts"][0]["value"], "designer")
+        self.assertEqual(parsed["worries"][0]["content"], "feeling stressed")
+        self.assertEqual(parsed["followups"][0]["content"], "check in tomorrow")
+        self.assertEqual(parsed["emotion_trend"], "steady")
+        self.assertEqual(parsed["user_joys"], ["left work early"])
 
     def test_parse_memory_extraction_result_returns_empty_on_invalid_json(self):
         service = GLMService()
@@ -207,7 +207,7 @@ class GLMServiceTests(unittest.TestCase):
           "taboos": [],
           "followups": [],
           "short_term_summary": "",
-          "emotion_trend": "平稳",
+          "emotion_trend": "steady",
           "user_joys": []
         }
         """
@@ -282,7 +282,7 @@ class GLMServiceTests(unittest.TestCase):
                 "choices": [
                     {
                         "finish_reason": "stop",
-                        "message": {"content": "我看完图片了", "role": "assistant"},
+                        "message": {"content": "looked at the image", "role": "assistant"},
                     }
                 ]
             }
@@ -302,17 +302,17 @@ class GLMServiceTests(unittest.TestCase):
             result = asyncio.run(
                 service.chat_multimodal(
                     system_prompt="system",
-                    user_message="[图片] 用户发送了一张图片",
+                    user_message="[image] user sent a picture",
                     content_parts=[{"type": "image_url", "image_url": {"url": "base64-image"}}],
-                    context_messages=[{"role": "assistant", "content": "之前聊过"}],
+                    context_messages=[{"role": "assistant", "content": "earlier context"}],
                 )
             )
 
-        self.assertEqual(result, "我看完图片了")
+        self.assertEqual(result, "looked at the image")
         payload = mocked_request.await_args.args[0]
         self.assertEqual(mocked_request.await_args.kwargs["api_key"], "mm-key")
         self.assertEqual(payload["model"], "glm-4.6v")
-        self.assertEqual(payload["messages"][1], {"role": "assistant", "content": "之前聊过"})
+        self.assertEqual(payload["messages"][1], {"role": "assistant", "content": "earlier context"})
         self.assertEqual(payload["messages"][2]["content"][1]["type"], "image_url")
 
     def test_chat_multimodal_builds_glm_payload_for_pdf(self):
@@ -322,7 +322,7 @@ class GLMServiceTests(unittest.TestCase):
                 "choices": [
                     {
                         "finish_reason": "stop",
-                        "message": {"content": "我看完 PDF 了", "role": "assistant"},
+                        "message": {"content": "looked at the pdf", "role": "assistant"},
                     }
                 ]
             }
@@ -342,15 +342,40 @@ class GLMServiceTests(unittest.TestCase):
             result = asyncio.run(
                 service.chat_multimodal(
                     system_prompt="system",
-                    user_message="[PDF] 用户发送了文件《test.pdf》",
+                    user_message="[pdf] user sent test.pdf",
                     content_parts=[{"type": "file_url", "file_url": {"url": "https://example.com/test.pdf"}}],
                 )
             )
 
-        self.assertEqual(result, "我看完 PDF 了")
+        self.assertEqual(result, "looked at the pdf")
         payload = mocked_request.await_args.args[0]
         self.assertEqual(payload["messages"][1]["content"][1]["type"], "file_url")
         self.assertEqual(payload["messages"][1]["content"][1]["file_url"]["url"], "https://example.com/test.pdf")
+
+    def test_plan_reply_chunks_respects_bounds_and_avoids_empty_chunks(self):
+        service = GLMService()
+
+        chunks = service.plan_reply_chunks(
+            "First sentence. Second sentence. Third sentence. Fourth sentence.",
+            chunk_min=2,
+            chunk_max=3,
+        )
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertLessEqual(len(chunks), 3)
+        self.assertTrue(all(chunk.strip() for chunk in chunks))
+
+    def test_plan_reply_chunks_splits_plain_text_fallback_deterministically(self):
+        service = GLMService()
+
+        chunks = service.plan_reply_chunks(
+            "alpha beta gamma delta epsilon zeta eta theta",
+            chunk_min=3,
+            chunk_max=3,
+        )
+
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(chunks, service.plan_reply_chunks("alpha beta gamma delta epsilon zeta eta theta", 3, 3))
 
 
 if __name__ == "__main__":
