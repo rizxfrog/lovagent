@@ -11,6 +11,7 @@ import random
 from typing import Optional
 
 from app.config import settings
+from app.services.redis_stream_bus import InboundActorEvent
 from app.services.runtime_config_service import runtime_config_service
 
 try:
@@ -119,6 +120,13 @@ class NapCatService:
         if not content or not external_user_id:
             return
 
+        actor_config = runtime_config_service.get_effective_actor_config()
+        if actor_config["actor_pipeline_enabled"]:
+            from app.services.inbound_actor_service import inbound_actor_service
+
+            await inbound_actor_service.publish_inbound_event(self._build_actor_event(payload, external_user_id, content))
+            return
+
         from app.graph import run_incoming_message_graph
 
         await run_incoming_message_graph(
@@ -127,6 +135,21 @@ class NapCatService:
                 "external_user_id": external_user_id,
                 "user_content": content,
             }
+        )
+
+    @staticmethod
+    def _build_actor_event(payload: dict, external_user_id: str, content: str) -> InboundActorEvent:
+        event_id = str(payload.get("message_id") or payload.get("message_seq") or "").strip()
+        return InboundActorEvent(
+            event_id=event_id,
+            channel="napcat",
+            external_user_id=external_user_id,
+            payload={
+                "text": content,
+                "content": content,
+                "message_type": str(payload.get("message_type") or "").strip() or "private",
+                "raw_message": content,
+            },
         )
 
     async def send_private_text(self, external_user_id: str, content: str) -> None:

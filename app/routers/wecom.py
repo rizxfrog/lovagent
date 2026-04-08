@@ -10,10 +10,12 @@ from wechatpy.exceptions import InvalidSignatureException
 
 from app.services.emotion_engine import emotion_engine  # 兼容测试 patch
 from app.services.incoming_aggregation_service import incoming_aggregation_service
+from app.services.inbound_actor_service import inbound_actor_service
 from app.services.llm_service import glm_service  # 兼容测试 patch
 from app.services.memory_service import memory_service  # 兼容测试 patch
 from app.services.multimodal_chat_service import multimodal_chat_service
 from app.services.persona_service import persona_service  # 兼容测试 patch
+from app.services.runtime_config_service import runtime_config_service
 from app.services.wecom_service import wecom_service
 
 router = APIRouter()
@@ -85,6 +87,11 @@ async def wecom_callback_handler(
 
     message = wecom_service.parse_message(decrypted_xml)
     logger.debug("收到消息: %s", message)
+
+    actor_config = runtime_config_service.get_effective_actor_config()
+    if actor_config["actor_pipeline_enabled"]:
+        await inbound_actor_service.publish_inbound_event(incoming_aggregation_service.build_actor_event(message))
+        return PlainTextResponse(content="success")
 
     registration = await incoming_aggregation_service.register_event(message)
     if not registration.get("duplicate"):

@@ -8,7 +8,7 @@ try:
     from app.routers import wecom
     from wechatpy.enterprise.crypto import WeChatCrypto
     IMPORT_ERROR = None
-except ModuleNotFoundError as exc:  # pragma: no cover - 取决于环境依赖是否已安装
+except ModuleNotFoundError as exc:  # pragma: no cover
     HTTPException = Exception
     wecom = None
     WeChatCrypto = None
@@ -87,7 +87,9 @@ class WeComCallbackVerifyTests(unittest.TestCase):
 
 @unittest.skipIf(wecom is None, f"missing dependency: {IMPORT_ERROR}")
 class WeComCallbackHandlerTests(unittest.TestCase):
-    def test_handler_registers_event_and_schedules_processing(self):
+    def test_handler_publishes_actor_event_when_pipeline_enabled(self):
+        publish_mock = AsyncMock()
+        register_mock = AsyncMock()
         with (
             patch.object(wecom.wecom_service, "decrypt_message", return_value="<xml />"),
             patch.object(
@@ -97,8 +99,57 @@ class WeComCallbackHandlerTests(unittest.TestCase):
                     "msg_id": "msg-1",
                     "msg_type": "text",
                     "from_user": "user-1",
-                    "content": "今天有点累",
+                    "content": "today feels heavy",
                 },
+            ),
+            patch(
+                "app.services.runtime_config_service.runtime_config_service.get_effective_actor_config",
+                return_value={"actor_pipeline_enabled": True},
+            ),
+            patch(
+                "app.services.inbound_actor_service.inbound_actor_service.publish_inbound_event",
+                publish_mock,
+                create=True,
+            ),
+            patch.object(wecom.incoming_aggregation_service, "register_event", register_mock),
+            patch.object(wecom.incoming_aggregation_service, "schedule_user_processing") as schedule_mock,
+        ):
+            response = asyncio.run(
+                wecom.wecom_callback_handler(
+                    request=DummyRequest(),
+                    msg_signature="sig",
+                    timestamp="123",
+                    nonce="nonce",
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body.decode(), "success")
+        publish_mock.assert_awaited_once()
+        event = publish_mock.await_args.args[0]
+        self.assertEqual(event.event_id, "msg-1")
+        self.assertEqual(event.channel, "wecom")
+        self.assertEqual(event.external_user_id, "user-1")
+        self.assertEqual(event.payload["text"], "today feels heavy")
+        register_mock.assert_not_awaited()
+        schedule_mock.assert_not_called()
+
+    def test_handler_registers_event_and_schedules_processing_when_pipeline_disabled(self):
+        with (
+            patch.object(wecom.wecom_service, "decrypt_message", return_value="<xml />"),
+            patch.object(
+                wecom.wecom_service,
+                "parse_message",
+                return_value={
+                    "msg_id": "msg-1",
+                    "msg_type": "text",
+                    "from_user": "user-1",
+                    "content": "today feels heavy",
+                },
+            ),
+            patch(
+                "app.services.runtime_config_service.runtime_config_service.get_effective_actor_config",
+                return_value={"actor_pipeline_enabled": False},
             ),
             patch.object(
                 wecom.incoming_aggregation_service,
@@ -121,7 +172,7 @@ class WeComCallbackHandlerTests(unittest.TestCase):
         register_mock.assert_awaited_once()
         schedule_mock.assert_called_once_with("user-1")
 
-    def test_handler_skips_scheduling_for_duplicate_event(self):
+    def test_handler_skips_scheduling_for_duplicate_event_when_pipeline_disabled(self):
         with (
             patch.object(wecom.wecom_service, "decrypt_message", return_value="<xml />"),
             patch.object(
@@ -131,8 +182,12 @@ class WeComCallbackHandlerTests(unittest.TestCase):
                     "msg_id": "msg-1",
                     "msg_type": "text",
                     "from_user": "user-1",
-                    "content": "今天有点累",
+                    "content": "today feels heavy",
                 },
+            ),
+            patch(
+                "app.services.runtime_config_service.runtime_config_service.get_effective_actor_config",
+                return_value={"actor_pipeline_enabled": False},
             ),
             patch.object(
                 wecom.incoming_aggregation_service,

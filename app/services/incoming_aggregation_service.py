@@ -14,6 +14,7 @@ from app.graph import run_incoming_message_graph
 from app.models.database import SessionLocal
 from app.models.user import InboundAggregateBatch, InboundMessageEvent
 from app.services.multimodal_chat_service import multimodal_chat_service
+from app.services.redis_stream_bus import InboundActorEvent
 
 
 MERGE_WINDOW_SECONDS = 5
@@ -84,6 +85,40 @@ class IncomingAggregationService:
             }
         finally:
             db.close()
+
+    def build_actor_event(self, message: Dict[str, object]) -> InboundActorEvent:
+        user_id = str(message.get("from_user") or "").strip()
+        if not user_id:
+            raise ValueError("Missing from_user")
+
+        normalized_text = self._normalize_event_text(message)
+        raw_content = str(message.get("content") or "").strip()
+        payload = {
+            "msg_type": str(message.get("msg_type") or "").strip().lower() or "text",
+            "text": normalized_text,
+            "content": raw_content or normalized_text,
+        }
+        for key in (
+            "media_id",
+            "file_name",
+            "title",
+            "image_url",
+            "create_time",
+            "format",
+            "location_x",
+            "location_y",
+            "label",
+        ):
+            value = message.get(key)
+            if value is not None and str(value).strip():
+                payload[key] = value
+
+        return InboundActorEvent(
+            event_id=self._resolve_message_key(message),
+            channel="wecom",
+            external_user_id=user_id,
+            payload=payload,
+        )
 
     def schedule_user_processing(self, user_id: str) -> None:
         """为某个用户调度后台聚合处理任务。"""

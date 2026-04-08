@@ -102,6 +102,21 @@ class InboundActorService:
         await self._bus.ensure_consumer_group()
         self._consumer_task = asyncio.create_task(self.consume_forever(), name="inbound-actor-consumer")
 
+    async def publish_inbound_event(self, event: InboundActorEvent) -> str:
+        normalized_event = self._normalize_event(event)
+        if self._bus is None:
+            self._bus = self._build_bus_from_config()
+
+        if self._bus is None:
+            logger.warning(
+                "Actor pipeline publish fallback without Redis; processing locally: actor=%s",
+                normalized_event.actor_key,
+            )
+            await self.enqueue_event(normalized_event)
+            return ""
+
+        return await self._bus.publish_inbound_event(normalized_event)
+
     async def stop(self) -> None:
         self._stopping = True
 
