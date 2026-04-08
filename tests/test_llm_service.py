@@ -447,5 +447,18 @@ class GLMServiceTests(unittest.TestCase):
         self.assertLessEqual(len(chunks), 3)
         self.assertEqual("".join(chunks), original)
 
+    def test_plan_reply_chunks_splits_naturally_on_chinese_sentence_punctuation(self):
+        service = GLMService()
+        original = "\u7b2c\u4e00\u53e5\u3002\u7b2c\u4e8c\u53e5\uff01\u7b2c\u4e09\u53e5\uff1f"
+
+        chunks = service.plan_reply_chunks(
+            original,
+            chunk_min=3,
+            chunk_max=3,
+        )
+
+        self.assertEqual(chunks, ["\u7b2c\u4e00\u53e5\u3002", "\u7b2c\u4e8c\u53e5\uff01", "\u7b2c\u4e09\u53e5\uff1f"])
+        self.assertEqual("".join(chunks), original)
+
 if __name__ == "__main__":
     unittest.main()

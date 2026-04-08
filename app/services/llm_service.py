@@ -434,7 +434,7 @@ class GLMService:
         return [chunk for chunk in merged if chunk and chunk.strip()]
 
     def _split_reply_fragments(self, text: str) -> List[str]:
-        punctuation = {".", "!", "?", "?", "?", "?"}
+        punctuation = {".", "!", "?", "\u3002", "\uff01", "\uff1f", "\n"}
         fragments: List[str] = []
         start = 0
 
@@ -471,7 +471,7 @@ class GLMService:
         return [*fragments[:index], *parts, *fragments[index + 1 :]]
 
     def _split_plain_fragment_once(self, fragment: str) -> List[str]:
-        separators = [",", ";", ":", "?", "?", "?", " "]
+        separators = [",", ".", "!", "?", ";", ":", "\u3002", "\uff01", "\uff1f", "\uff0c", "\uff1b", "\uff1a", "\n", " "]
         midpoint = len(fragment) // 2
         best_split = -1
         split_separator = ""
