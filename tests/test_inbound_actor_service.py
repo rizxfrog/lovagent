@@ -7,7 +7,7 @@ from uuid import uuid4
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal, init_db
 from app.services.inbound_actor_service import InboundActorEvent, InboundActorService
-from app.services.redis_stream_bus import DlqActorEvent, StreamEnvelope
+from app.services.redis_stream_bus import DlqActorEvent, RedisStreamBus, StreamEnvelope
 
 
 class FakeRedisStreamBus:
@@ -551,6 +551,36 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
             .count()
         )
         self.assertEqual(db_count, 1)
+
+    def test_stream_envelope_parser_tolerates_malformed_attempt(self):
+        event = RedisStreamBus._deserialize_event(
+            "42-0",
+            {
+                "event_id": "",
+                "channel": "wecom",
+                "external_user_id": "parse-user",
+                "payload": '{"text":"hello"}',
+                "attempt": "x",
+                "occurred_at": "2026-04-09T12:00:00",
+            },
+        )
+
+        self.assertEqual(event.event_id, "stream:42-0")
+        self.assertEqual(event.attempt, 0)
+        self.assertEqual(event.source_message_id, "42-0")
+
+        negative = RedisStreamBus._deserialize_event(
+            "43-0",
+            {
+                "event_id": "evt-negative",
+                "channel": "wecom",
+                "external_user_id": "parse-user",
+                "payload": '{"text":"hello"}',
+                "attempt": "-3",
+            },
+        )
+
+        self.assertEqual(negative.attempt, 0)
 
 
 if __name__ == "__main__":

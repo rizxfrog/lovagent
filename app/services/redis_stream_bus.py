@@ -216,7 +216,14 @@ class RedisStreamBus:
             channel=str(fields.get("channel") or "").strip() or "wecom",
             external_user_id=str(fields.get("external_user_id") or "").strip(),
             payload=payload,
-            attempt=int(fields.get("attempt") or 0),
+            attempt=RedisStreamBus._coerce_attempt(fields.get("attempt")),
             occurred_at=occurred_at,
             source_message_id=message_id,
         )
+
+    @staticmethod
+    def _coerce_attempt(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
