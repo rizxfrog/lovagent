@@ -3,6 +3,7 @@
 """
 
 from app.models.admin import AgentConfig
+from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.user import (
     Base,
     Conversation,
@@ -19,6 +20,8 @@ from app.models.database import init_db, get_db, SessionLocal, engine
 
 __all__ = [
     "AgentConfig",
+    "ActorInflightState",
+    "InboundEventDedup",
     "User",
     "Conversation",
     "InboundAggregateBatch",

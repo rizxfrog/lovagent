@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
+import app.models.actor  # noqa: F401
 import app.models.admin  # noqa: F401
 import app.models.conversation  # noqa: F401
 import app.models.emotion  # noqa: F401
