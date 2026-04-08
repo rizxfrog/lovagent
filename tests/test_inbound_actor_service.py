@@ -437,6 +437,37 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(bus.reclaim_calls, 0)
         self.assertEqual(delivered_turns, [["stream:9-0"]])
 
+    async def test_existing_pending_dedup_does_not_enqueue_duplicate_again(self):
+        generated_turns: list[list[str]] = []
+        delivered_turns: list[list[str]] = []
+        external_user_id = f"pending-dup-user-{uuid4().hex[:8]}"
+        actor_key = InboundActorService.actor_key("wecom", external_user_id)
+        self._save_dedup_record(event_id="evt-pending", actor_key=actor_key, processed_at=None)
+
+        async def generate_reply(turn):
+            generated_turns.append([event.event_id for event in turn.events])
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            delivered_turns.append([event.event_id for event in turn.events])
+
+        service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, debounce_ms=0)
+        result = await service.enqueue_event(
+            InboundActorEvent(
+                event_id="evt-pending",
+                channel="wecom",
+                external_user_id=external_user_id,
+                payload={"text": "duplicate pending"},
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(result.duplicate)
+        self.assertFalse(result.ack_immediately)
+        self.assertNotIn(actor_key, service._actors)
+        self.assertEqual(generated_turns, [])
+        self.assertEqual(delivered_turns, [])
+
     async def test_duplicate_stream_message_with_processed_dedup_is_acked_immediately(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"dup-user-{uuid4().hex[:8]}"

@@ -83,6 +83,44 @@ class NapCatServiceTests(unittest.TestCase):
         )
         publish_mock.assert_not_awaited()
 
+    def test_private_message_falls_back_to_legacy_graph_when_actor_publish_fails(self):
+        service = NapCatService()
+        graph_mock = AsyncMock(return_value={"agent_response": "ok"})
+
+        with (
+            patch(
+                "app.services.runtime_config_service.runtime_config_service.get_effective_actor_config",
+                return_value={"actor_pipeline_enabled": True},
+            ),
+            patch(
+                "app.services.inbound_actor_service.inbound_actor_service.publish_inbound_event",
+                AsyncMock(side_effect=RuntimeError("redis down")),
+                create=True,
+            ) as publish_mock,
+            patch("app.graph.run_incoming_message_graph", graph_mock),
+        ):
+            asyncio.run(
+                service._handle_message(
+                    json.dumps(
+                        {
+                            "post_type": "message",
+                            "message_type": "private",
+                            "user_id": "10001",
+                            "raw_message": "hello from qq",
+                        }
+                    )
+                )
+            )
+
+        publish_mock.assert_awaited_once()
+        graph_mock.assert_awaited_once_with(
+            {
+                "channel": "napcat",
+                "external_user_id": "10001",
+                "user_content": "hello from qq",
+            }
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

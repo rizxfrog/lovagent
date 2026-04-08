@@ -124,8 +124,11 @@ class NapCatService:
         if actor_config["actor_pipeline_enabled"]:
             from app.services.inbound_actor_service import inbound_actor_service
 
-            await inbound_actor_service.publish_inbound_event(self._build_actor_event(payload, external_user_id, content))
-            return
+            try:
+                await inbound_actor_service.publish_inbound_event(self._build_actor_event(payload, external_user_id, content))
+                return
+            except Exception:
+                logger.exception("NapCat actor publish failed; falling back to legacy graph path")
 
         from app.graph import run_incoming_message_graph
 

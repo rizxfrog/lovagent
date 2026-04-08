@@ -191,6 +191,13 @@ class InboundActorService:
                 generation_version=0,
                 ack_immediately=True,
             )
+        if dedup_state == "existing_pending" and not normalized_event.source_message_id:
+            return EnqueueResult(
+                duplicate=True,
+                actor_key=normalized_event.actor_key,
+                generation_version=0,
+                ack_immediately=False,
+            )
 
         state = await self._get_or_create_state(normalized_event.channel, normalized_event.external_user_id)
         config = self._current_config()

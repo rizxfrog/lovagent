@@ -22,6 +22,16 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _should_use_actor_pipeline(message: dict) -> bool:
+    return str(message.get("msg_type") or "").strip().lower() == "text"
+
+
+async def _handle_legacy_message(message: dict) -> None:
+    registration = await incoming_aggregation_service.register_event(message)
+    if not registration.get("duplicate"):
+        incoming_aggregation_service.schedule_user_processing(str(message.get("from_user") or ""))
+
+
 @router.get("/callback")
 async def wecom_callback_verify(
     msg_signature: str = Query(..., alias="msg_signature"),
@@ -89,13 +99,14 @@ async def wecom_callback_handler(
     logger.debug("收到消息: %s", message)
 
     actor_config = runtime_config_service.get_effective_actor_config()
-    if actor_config["actor_pipeline_enabled"]:
-        await inbound_actor_service.publish_inbound_event(incoming_aggregation_service.build_actor_event(message))
-        return PlainTextResponse(content="success")
+    if actor_config["actor_pipeline_enabled"] and _should_use_actor_pipeline(message):
+        try:
+            await inbound_actor_service.publish_inbound_event(incoming_aggregation_service.build_actor_event(message))
+            return PlainTextResponse(content="success")
+        except Exception:
+            logger.exception("Actor pipeline publish failed for WeCom inbound message; falling back to legacy path")
 
-    registration = await incoming_aggregation_service.register_event(message)
-    if not registration.get("duplicate"):
-        incoming_aggregation_service.schedule_user_processing(str(message.get("from_user") or ""))
+    await _handle_legacy_message(message)
 
     return PlainTextResponse(content="success")
 
