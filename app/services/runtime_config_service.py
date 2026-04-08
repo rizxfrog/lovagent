@@ -6,7 +6,7 @@ from copy import deepcopy
 from threading import RLock
 from time import monotonic
 from typing import Dict, Optional
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm.attributes import flag_modified
@@ -353,6 +353,28 @@ class RuntimeConfigService:
         finally:
             db.close()
 
+    def save_actor_settings(self, payload: Dict) -> Dict:
+        actor_payload = deepcopy(payload) if isinstance(payload, dict) else {}
+        redis_password = actor_payload.get("redis_password")
+        redis_password_omitted = "redis_password" not in actor_payload or redis_password is None
+
+        if redis_password_omitted:
+            actor_payload.pop("redis_password", None)
+
+        if "redis_url" in actor_payload and redis_password_omitted:
+            current_raw_redis_url = str(self.get_config()["channels_actor"].get("redis_url") or "").strip()
+            requested_redis_url = str(actor_payload.get("redis_url") or "").strip()
+            current_sanitized_redis_url = self._sanitize_actor_redis_url(current_raw_redis_url)
+            if (
+                current_raw_redis_url
+                and requested_redis_url
+                and current_raw_redis_url != current_sanitized_redis_url
+                and requested_redis_url == current_sanitized_redis_url
+            ):
+                actor_payload["redis_url"] = current_raw_redis_url
+
+        return self.save_section("channels_actor", actor_payload)
+
     def _set_cache(self, config: Dict) -> None:
         with self._cache_lock:
             self._cached_config = deepcopy(config)
@@ -610,7 +632,15 @@ class RuntimeConfigService:
             return value
 
         parsed = urlsplit(value)
-        if not parsed.netloc or "@" not in parsed.netloc:
+        sensitive_query_keys = {"password", "pass", "pwd", "token", "secret"}
+        sanitized_query_params = [
+            (key, query_value)
+            for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+            if str(key).strip().lower() not in sensitive_query_keys
+        ]
+        sanitized_query = urlencode(sanitized_query_params, doseq=True)
+        has_userinfo = "@" in parsed.netloc
+        if not parsed.netloc or (not has_userinfo and sanitized_query == parsed.query):
             return value
 
         hostname = parsed.hostname or ""
@@ -625,7 +655,7 @@ class RuntimeConfigService:
             scheme=parsed.scheme,
             netloc=netloc,
             path=parsed.path,
-            query=parsed.query,
+            query=sanitized_query,
             fragment=parsed.fragment,
         )
         return urlunsplit(sanitized)

@@ -90,9 +90,7 @@ async def get_actor_settings(_: bool = Depends(require_admin)):
 @router.put("/actor-settings", response_model=ActorSettingsResponse)
 async def update_actor_settings(payload: ActorSettingsPayload, _: bool = Depends(require_admin)):
     body = payload.model_dump(exclude_unset=True)
-    if body.get("redis_password") is None:
-        body.pop("redis_password", None)
-    runtime_config_service.save_section("channels_actor", body)
+    runtime_config_service.save_actor_settings(body)
     return runtime_config_service.get_actor_settings_payload()
 
 

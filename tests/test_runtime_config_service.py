@@ -385,6 +385,29 @@ class RuntimeConfigServiceTests(unittest.TestCase):
                 self.assertNotIn("token", public_actor["redis_url"])
                 self.assertNotIn("user", public_actor["redis_url"])
 
+    def test_actor_settings_payload_redacts_sensitive_redis_query_params(self):
+        self._clear_runtime_config()
+
+        runtime_config_service.save_section(
+            "channels_actor",
+            {
+                "redis_url": (
+                    "redis://cache.example.com:6379/0"
+                    "?password=query-secret&Pwd=hidden&token=abc123&secret=zzz&pass=remove-me&foo=bar"
+                ),
+                "redis_password": "runtime-secret",
+            },
+        )
+
+        public_actor = runtime_config_service.get_actor_settings_payload()
+
+        self.assertEqual(public_actor["redis_url"], "redis://cache.example.com:6379/0?foo=bar")
+        self.assertNotIn("password", public_actor["redis_url"].lower())
+        self.assertNotIn("pwd", public_actor["redis_url"].lower())
+        self.assertNotIn("token", public_actor["redis_url"].lower())
+        self.assertNotIn("secret", public_actor["redis_url"].lower())
+        self.assertNotIn("pass", public_actor["redis_url"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

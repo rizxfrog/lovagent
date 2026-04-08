@@ -571,6 +571,67 @@ class AdminApiTests(unittest.TestCase):
                 self.assertNotIn("user", payload["redis_url"])
                 self.assertNotIn("redis_password", payload)
 
+    def test_actor_settings_get_redacts_sensitive_redis_query_params(self):
+        self.login()
+        self._replace_runtime_section(
+            "channels_actor",
+            {
+                **self.EMPTY_CHANNELS_ACTOR_CONFIG,
+                "redis_url": (
+                    "redis://cache.example.com:6379/0"
+                    "?password=query-secret&PASS=remove-me&pwd=hidden&token=abc123&secret=zzz&foo=bar"
+                ),
+                "redis_password": "runtime-secret",
+            },
+        )
+
+        response = self.client.get("/admin-api/actor-settings")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["redis_url"], "redis://cache.example.com:6379/0?foo=bar")
+        self.assertNotIn("password", payload["redis_url"].lower())
+        self.assertNotIn("pass", payload["redis_url"].lower())
+        self.assertNotIn("pwd", payload["redis_url"].lower())
+        self.assertNotIn("token", payload["redis_url"].lower())
+        self.assertNotIn("secret", payload["redis_url"].lower())
+
+    def test_actor_settings_put_preserves_legacy_raw_redis_url_when_reusing_sanitized_url_without_password(self):
+        self.login()
+        raw_redis_url = (
+            "redis://token:secret@cache.example.com:6379/4"
+            "?password=query-secret&foo=bar"
+        )
+        self._replace_runtime_section(
+            "channels_actor",
+            {
+                **self.EMPTY_CHANNELS_ACTOR_CONFIG,
+                "redis_url": raw_redis_url,
+                "redis_password": "",
+                "actor_pipeline_enabled": True,
+                "actor_debounce_ms": 2400,
+                "actor_max_messages_per_turn": 10,
+                "actor_first_reply_delay_ms": 300,
+                "actor_chunk_delay_ms": 200,
+                "actor_reply_chunk_min": 1,
+                "actor_reply_chunk_max": 5,
+                "actor_retry_max_attempts": 3,
+                "actor_retry_backoff_base_ms": 300,
+            },
+        )
+
+        get_response = self.client.get("/admin-api/actor-settings")
+        self.assertEqual(get_response.status_code, 200)
+        sanitized_payload = get_response.json()
+        self.assertEqual(sanitized_payload["redis_url"], "redis://cache.example.com:6379/4?foo=bar")
+
+        put_response = self.client.put("/admin-api/actor-settings", json=sanitized_payload)
+
+        self.assertEqual(put_response.status_code, 200)
+        self.assertEqual(put_response.json()["redis_url"], "redis://cache.example.com:6379/4?foo=bar")
+        self.assertEqual(runtime_config_service.get_config()["channels_actor"]["redis_url"], raw_redis_url)
+        self.assertEqual(runtime_config_service.get_effective_actor_config()["redis_url"], raw_redis_url)
+
 
 class PromptCompositionTests(unittest.TestCase):
     def test_build_dynamic_prompt_includes_persona_and_memory(self):
