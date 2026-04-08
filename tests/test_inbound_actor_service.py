@@ -415,6 +415,53 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(bus.reclaim_calls, 0)
         self.assertEqual(delivered_turns, [["stream:9-0"]])
 
+    async def test_duplicate_stream_message_is_acked_immediately(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"dup-user-{uuid4().hex[:8]}"
+        generated_turns: list[list[str]] = []
+        delivered_turns: list[list[str]] = []
+
+        async def generate_reply(turn):
+            generated_turns.append([event.event_id for event in turn.events])
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            delivered_turns.append([event.event_id for event in turn.events])
+
+        service = self._make_service(generate_reply=generate_reply, deliver_reply=deliver_reply, bus=bus)
+        await service.enqueue_event(
+            InboundActorEvent(
+                event_id="evt-dup",
+                channel="wecom",
+                external_user_id=external_user_id,
+                payload={"text": "first"},
+            )
+        )
+        await self._wait_for_actor_idle(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+            min_deliveries=1,
+            delivered_turns=delivered_turns,
+        )
+
+        bus.pending_messages.append(
+            self._envelope(
+                message_id="10-0",
+                event_id="evt-dup",
+                external_user_id=external_user_id,
+                text="duplicate",
+            )
+        )
+        await service.start()
+
+        await self._wait_for(lambda: bus.acked == ["10-0"])
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(generated_turns, [["evt-dup"]])
+        self.assertEqual(delivered_turns, [["evt-dup"]])
+        self.assertEqual(bus.acked, ["10-0"])
+
     async def test_concurrent_first_enqueue_does_not_create_duplicate_runtime_state(self):
         suffix = uuid4().hex[:8]
         external_user_id = f"concurrent-user-{suffix}"

@@ -45,6 +45,7 @@ class EnqueueResult:
     duplicate: bool
     actor_key: str
     generation_version: int
+    ack_immediately: bool = False
 
 
 @dataclass
@@ -150,10 +151,12 @@ class InboundActorService:
                 consecutive_failures = 0
                 for message in messages:
                     try:
-                        await self.enqueue_event(self._bind_envelope_event(message))
+                        result = await self.enqueue_event(self._bind_envelope_event(message))
                     except Exception:
                         logger.exception("Inbound actor event handling failed: message_id=%s", message.message_id)
                         continue
+                    if result.ack_immediately:
+                        await self._bus.ack(message.message_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -165,7 +168,12 @@ class InboundActorService:
     async def enqueue_event(self, event: InboundActorEvent) -> EnqueueResult:
         normalized_event = self._normalize_event(event)
         if not self._insert_dedup(normalized_event):
-            return EnqueueResult(duplicate=True, actor_key=normalized_event.actor_key, generation_version=0)
+            return EnqueueResult(
+                duplicate=True,
+                actor_key=normalized_event.actor_key,
+                generation_version=0,
+                ack_immediately=True,
+            )
 
         state = await self._get_or_create_state(normalized_event.channel, normalized_event.external_user_id)
         config = self._current_config()
@@ -187,6 +195,7 @@ class InboundActorService:
                 duplicate=False,
                 actor_key=state.actor_key,
                 generation_version=state.generation_version,
+                ack_immediately=False,
             )
 
     async def flush_actor(self, *, channel: str, external_user_id: str) -> None:
