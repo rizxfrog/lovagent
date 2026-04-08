@@ -358,21 +358,32 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertTrue(public_actor["has_redis_password"])
             self.assertEqual(public_actor["redis_url"], "redis://runtime.example.com:6379/2")
 
-    def test_actor_settings_payload_redacts_password_from_redis_url(self):
+    def test_actor_settings_payload_strips_userinfo_from_redis_url(self):
         self._clear_runtime_config()
 
-        runtime_config_service.save_section(
-            "channels_actor",
-            {
-                "redis_url": "redis://:secret-pass@cache.example.com:6379/2",
-                "redis_password": "runtime-secret",
-            },
-        )
+        cases = [
+            ("redis://:secret@host.example.com:6379/0", "redis://host.example.com:6379/0"),
+            ("redis://token@host.example.com:6379/0", "redis://host.example.com:6379/0"),
+            ("redis://user:secret@host.example.com:6379/0", "redis://host.example.com:6379/0"),
+        ]
 
-        public_actor = runtime_config_service.get_actor_settings_payload()
+        for redis_url, expected in cases:
+            with self.subTest(redis_url=redis_url):
+                runtime_config_service.save_section(
+                    "channels_actor",
+                    {
+                        "redis_url": redis_url,
+                        "redis_password": "runtime-secret",
+                    },
+                )
 
-        self.assertEqual(public_actor["redis_url"], "redis://cache.example.com:6379/2")
-        self.assertNotIn("secret-pass", public_actor["redis_url"])
+                public_actor = runtime_config_service.get_actor_settings_payload()
+
+                self.assertEqual(public_actor["redis_url"], expected)
+                self.assertNotIn("@", public_actor["redis_url"])
+                self.assertNotIn("secret", public_actor["redis_url"])
+                self.assertNotIn("token", public_actor["redis_url"])
+                self.assertNotIn("user", public_actor["redis_url"])
 
 
 if __name__ == "__main__":

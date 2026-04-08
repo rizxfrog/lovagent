@@ -540,25 +540,36 @@ class AdminApiTests(unittest.TestCase):
                 "runtime-secret",
             )
 
-    def test_actor_settings_get_redacts_password_in_redis_url(self):
+    def test_actor_settings_get_strips_userinfo_from_redis_url(self):
         self.login()
-        self._replace_runtime_section(
-            "channels_actor",
-            {
-                **self.EMPTY_CHANNELS_ACTOR_CONFIG,
-                "redis_url": "redis://:secret-pass@cache.example.com:6379/4",
-                "redis_password": "runtime-secret",
-            },
-        )
+        cases = [
+            ("redis://:secret@cache.example.com:6379/0", "redis://cache.example.com:6379/0"),
+            ("redis://token@cache.example.com:6379/0", "redis://cache.example.com:6379/0"),
+            ("redis://user:secret@cache.example.com:6379/0", "redis://cache.example.com:6379/0"),
+        ]
 
-        response = self.client.get("/admin-api/actor-settings")
+        for redis_url, expected in cases:
+            with self.subTest(redis_url=redis_url):
+                self._replace_runtime_section(
+                    "channels_actor",
+                    {
+                        **self.EMPTY_CHANNELS_ACTOR_CONFIG,
+                        "redis_url": redis_url,
+                        "redis_password": "runtime-secret",
+                    },
+                )
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["redis_url"], "redis://cache.example.com:6379/4")
-        self.assertTrue(payload["has_redis_password"])
-        self.assertNotIn("secret-pass", payload["redis_url"])
-        self.assertNotIn("redis_password", payload)
+                response = self.client.get("/admin-api/actor-settings")
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["redis_url"], expected)
+                self.assertTrue(payload["has_redis_password"])
+                self.assertNotIn("@", payload["redis_url"])
+                self.assertNotIn("secret", payload["redis_url"])
+                self.assertNotIn("token", payload["redis_url"])
+                self.assertNotIn("user", payload["redis_url"])
+                self.assertNotIn("redis_password", payload)
 
 
 class PromptCompositionTests(unittest.TestCase):

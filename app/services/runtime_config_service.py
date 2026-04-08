@@ -610,7 +610,7 @@ class RuntimeConfigService:
             return value
 
         parsed = urlsplit(value)
-        if not parsed.netloc or parsed.password is None:
+        if not parsed.netloc or "@" not in parsed.netloc:
             return value
 
         hostname = parsed.hostname or ""
