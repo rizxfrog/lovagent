@@ -540,6 +540,26 @@ class AdminApiTests(unittest.TestCase):
                 "runtime-secret",
             )
 
+    def test_actor_settings_get_redacts_password_in_redis_url(self):
+        self.login()
+        self._replace_runtime_section(
+            "channels_actor",
+            {
+                **self.EMPTY_CHANNELS_ACTOR_CONFIG,
+                "redis_url": "redis://:secret-pass@cache.example.com:6379/4",
+                "redis_password": "runtime-secret",
+            },
+        )
+
+        response = self.client.get("/admin-api/actor-settings")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["redis_url"], "redis://cache.example.com:6379/4")
+        self.assertTrue(payload["has_redis_password"])
+        self.assertNotIn("secret-pass", payload["redis_url"])
+        self.assertNotIn("redis_password", payload)
+
 
 class PromptCompositionTests(unittest.TestCase):
     def test_build_dynamic_prompt_includes_persona_and_memory(self):

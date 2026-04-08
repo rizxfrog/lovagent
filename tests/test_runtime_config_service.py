@@ -210,6 +210,30 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertEqual(effective_model["model_provider"], "openai_compatible")
             self.assertEqual(effective_model["openai_api_key"], "env-openai-key")
 
+    def test_empty_model_section_keeps_env_derived_glm_default_despite_openai_base_url(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "model_provider", "glm"),
+            patch.object(settings, "openai_base_url", "https://api.openai.com/v1"),
+            patch.object(settings, "openai_model", "gpt-4o-mini"),
+        ):
+            runtime_record = RuntimeConfig(
+                config_key=RUNTIME_CONFIG_KEY,
+                config_value={"model": {}},
+            )
+            self.db.add(runtime_record)
+            self.db.commit()
+            runtime_config_service.invalidate_cache()
+
+            raw_model = runtime_config_service.get_config()["model"]
+            effective_model = runtime_config_service.get_effective_model_config()
+
+            self.assertEqual(raw_model["provider_id"], "zhipu")
+            self.assertEqual(raw_model["model_provider"], "glm")
+            self.assertEqual(effective_model["provider_id"], "zhipu")
+            self.assertEqual(effective_model["model_provider"], "glm")
+
     def test_effective_actor_config_prefers_runtime_values_and_normalizes_bounds(self):
         self._clear_runtime_config()
 
@@ -333,6 +357,22 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertNotIn("redis_password", public_actor)
             self.assertTrue(public_actor["has_redis_password"])
             self.assertEqual(public_actor["redis_url"], "redis://runtime.example.com:6379/2")
+
+    def test_actor_settings_payload_redacts_password_from_redis_url(self):
+        self._clear_runtime_config()
+
+        runtime_config_service.save_section(
+            "channels_actor",
+            {
+                "redis_url": "redis://:secret-pass@cache.example.com:6379/2",
+                "redis_password": "runtime-secret",
+            },
+        )
+
+        public_actor = runtime_config_service.get_actor_settings_payload()
+
+        self.assertEqual(public_actor["redis_url"], "redis://cache.example.com:6379/2")
+        self.assertNotIn("secret-pass", public_actor["redis_url"])
 
 
 if __name__ == "__main__":

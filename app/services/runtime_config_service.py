@@ -6,6 +6,7 @@ from copy import deepcopy
 from threading import RLock
 from time import monotonic
 from typing import Dict, Optional
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm.attributes import flag_modified
@@ -124,9 +125,16 @@ class RuntimeConfigService:
         source = incoming if isinstance(incoming, dict) else {}
         explicit_provider_id = str(source.get("provider_id") or "").strip().lower()
         explicit_model_provider = str(source.get("model_provider") or "").strip().lower()
-        provider_base_url = str(source.get("provider_base_url", defaults["provider_base_url"]) or "").strip()
-        openai_base_url = str(source.get("openai_base_url", defaults["openai_base_url"]) or "").strip()
-        has_provider_signal = bool(explicit_provider_id or explicit_model_provider or provider_base_url or openai_base_url)
+        explicit_provider_base_url = str(source.get("provider_base_url") or "").strip()
+        explicit_openai_base_url = str(source.get("openai_base_url") or "").strip()
+        provider_base_url = explicit_provider_base_url or str(defaults["provider_base_url"]).strip()
+        openai_base_url = explicit_openai_base_url or str(defaults["openai_base_url"]).strip()
+        has_provider_signal = bool(
+            explicit_provider_id
+            or explicit_model_provider
+            or explicit_provider_base_url
+            or explicit_openai_base_url
+        )
 
         if has_provider_signal:
             provider_id = infer_provider_id(
@@ -582,7 +590,7 @@ class RuntimeConfigService:
     def get_actor_settings_payload(self) -> Dict:
         actor = self.get_effective_actor_config()
         return {
-            "redis_url": actor["redis_url"],
+            "redis_url": self._sanitize_actor_redis_url(actor["redis_url"]),
             "has_redis_password": bool(actor["redis_password"]),
             "actor_pipeline_enabled": actor["actor_pipeline_enabled"],
             "actor_debounce_ms": actor["actor_debounce_ms"],
@@ -594,6 +602,33 @@ class RuntimeConfigService:
             "actor_retry_max_attempts": actor["actor_retry_max_attempts"],
             "actor_retry_backoff_base_ms": actor["actor_retry_backoff_base_ms"],
         }
+
+    @staticmethod
+    def _sanitize_actor_redis_url(redis_url: str) -> str:
+        value = str(redis_url or "").strip()
+        if not value:
+            return value
+
+        parsed = urlsplit(value)
+        if not parsed.netloc or parsed.password is None:
+            return value
+
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+
+        sanitized = SplitResult(
+            scheme=parsed.scheme,
+            netloc=netloc,
+            path=parsed.path,
+            query=parsed.query,
+            fragment=parsed.fragment,
+        )
+        return urlunsplit(sanitized)
 
     def get_callback_url(self) -> str:
         public_base_url = self.get_effective_public_base_url()
