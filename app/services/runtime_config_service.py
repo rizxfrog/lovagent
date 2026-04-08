@@ -1,8 +1,10 @@
-"""
-运行时配置服务
+﻿"""
+杩愯鏃堕厤缃湇鍔?
 """
 
 from copy import deepcopy
+from threading import RLock
+from time import monotonic
 from typing import Dict, Optional
 
 from sqlalchemy.exc import OperationalError
@@ -15,6 +17,7 @@ from app.services.provider_catalog import get_provider_preset, infer_provider_id
 
 
 RUNTIME_CONFIG_KEY = "setup_runtime_config"
+CONFIG_CACHE_TTL_SECONDS = 2.0
 
 DEFAULT_RUNTIME_CONFIG = {
     "model": {
@@ -64,7 +67,12 @@ DEFAULT_RUNTIME_CONFIG = {
 
 
 class RuntimeConfigService:
-    """读写安装向导运行时配置。"""
+    """运行时配置服务。"""
+
+    def __init__(self) -> None:
+        self._cache_lock = RLock()
+        self._cached_config: Optional[Dict] = None
+        self._cache_expire_at: float = 0.0
 
     def _normalize_model_section(self, incoming: Dict | None) -> Dict:
         defaults = deepcopy(DEFAULT_RUNTIME_CONFIG["model"])
@@ -107,6 +115,11 @@ class RuntimeConfigService:
         return defaults
 
     def get_config(self) -> Dict:
+        now = monotonic()
+        with self._cache_lock:
+            if self._cached_config is not None and now < self._cache_expire_at:
+                return deepcopy(self._cached_config)
+
         db = SessionLocal()
         try:
             try:
@@ -116,10 +129,14 @@ class RuntimeConfigService:
                     .first()
                 )
             except OperationalError:
-                return deepcopy(DEFAULT_RUNTIME_CONFIG)
+                config = deepcopy(DEFAULT_RUNTIME_CONFIG)
+                self._set_cache(config)
+                return deepcopy(config)
 
             if not record:
-                return deepcopy(DEFAULT_RUNTIME_CONFIG)
+                config = deepcopy(DEFAULT_RUNTIME_CONFIG)
+                self._set_cache(config)
+                return deepcopy(config)
 
             merged = deepcopy(DEFAULT_RUNTIME_CONFIG)
             value = record.config_value or {}
@@ -129,6 +146,7 @@ class RuntimeConfigService:
                     merged[section] = self._normalize_model_section(incoming if isinstance(incoming, dict) else {})
                 elif isinstance(incoming, dict):
                     merged[section].update({key: incoming.get(key, fallback) for key, fallback in defaults.items()})
+            self._set_cache(merged)
             return merged
         finally:
             db.close()
@@ -160,9 +178,20 @@ class RuntimeConfigService:
             flag_modified(record, "config_value")
             db.commit()
             db.refresh(record)
+            self.invalidate_cache()
             return self.get_config()
         finally:
             db.close()
+
+    def _set_cache(self, config: Dict) -> None:
+        with self._cache_lock:
+            self._cached_config = deepcopy(config)
+            self._cache_expire_at = monotonic() + CONFIG_CACHE_TTL_SECONDS
+
+    def invalidate_cache(self) -> None:
+        with self._cache_lock:
+            self._cached_config = None
+            self._cache_expire_at = 0.0
 
     def get_effective_model_config(self) -> Dict:
         config = self.get_config()["model"]
@@ -451,3 +480,4 @@ class RuntimeConfigService:
 
 
 runtime_config_service = RuntimeConfigService()
+
