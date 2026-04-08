@@ -386,16 +386,44 @@ class GLMServiceTests(unittest.TestCase):
 
     def test_plan_reply_chunks_keeps_all_characters_for_chinese_text(self):
         service = GLMService()
+        original = "\u4eca\u5929\u771f\u7684\u6709\u70b9\u7d2f\u4f46\u662f\u89c1\u5230\u4f60\u5c31\u5f00\u5fc3"
 
         chunks = service.plan_reply_chunks(
-            "今天真的有点累但是见到你就开心",
+            original,
             chunk_min=2,
             chunk_max=2,
         )
 
         self.assertEqual(len(chunks), 2)
-        self.assertEqual("".join(chunks), "今天真的有点累但是见到你就开心")
+        self.assertEqual("".join(chunks), original)
 
+    def test_plan_reply_chunks_preserves_original_english_text_exactly(self):
+        service = GLMService()
+        original = "Hello, world. Nice to meet you: really nice."
+
+        chunks = service.plan_reply_chunks(
+            original,
+            chunk_min=2,
+            chunk_max=3,
+        )
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertLessEqual(len(chunks), 3)
+        self.assertEqual("".join(chunks), original)
+
+    def test_plan_reply_chunks_preserves_original_chinese_text_exactly(self):
+        service = GLMService()
+        original = "\u4eca\u5929\u771f\u7684\u6709\u70b9\u7d2f\uff0c\u4f46\u662f\u89c1\u5230\u4f60\u5c31\u5f00\u5fc3\u4e86\u3002"
+
+        chunks = service.plan_reply_chunks(
+            original,
+            chunk_min=2,
+            chunk_max=3,
+        )
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertLessEqual(len(chunks), 3)
+        self.assertEqual("".join(chunks), original)
 
 if __name__ == "__main__":
     unittest.main()

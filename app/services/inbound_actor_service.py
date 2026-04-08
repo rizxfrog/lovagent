@@ -656,14 +656,20 @@ class InboundActorService:
     @staticmethod
     def _delivery_completed(delivery_result: object) -> bool:
         if isinstance(delivery_result, dict):
-            return (
-                str(delivery_result.get("status") or "").strip().lower() == "sent"
-                and int(delivery_result.get("sent_chunks") or 0) > 0
-            )
+            status = str(delivery_result.get("status") or "").strip().lower()
+            if status != "sent":
+                return False
+            if "sent_chunks" not in delivery_result:
+                return True
+            return int(delivery_result.get("sent_chunks") or 0) > 0
         status = getattr(delivery_result, "status", None)
         if isinstance(status, str):
+            if status.strip().lower() != "sent":
+                return False
+            if not hasattr(delivery_result, "sent_chunks"):
+                return True
             sent_chunks = getattr(delivery_result, "sent_chunks", 0)
-            return status.strip().lower() == "sent" and int(sent_chunks or 0) > 0
+            return int(sent_chunks or 0) > 0
         return True
 
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:

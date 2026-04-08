@@ -459,9 +459,76 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bus.dlq_events), 1)
         self.assertEqual(bus.acked, ["1-empty"])
 
+    async def test_legacy_sent_dict_result_without_sent_chunks_still_acks(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"legacy-delivery-user-{uuid4().hex[:8]}"
+        event = InboundActorEvent(
+            event_id="evt-legacy-delivery",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "hello"},
+            source_message_id="1-legacy",
+        )
+
+        async def generate_reply(turn):
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            return {"status": "sent"}
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=0,
+            bus=bus,
+        )
+        await service.enqueue_event(event)
+        await self._wait_for_actor_quiescent(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+        )
+
+        self.assertEqual(bus.acked, ["1-legacy"])
+        self.assertEqual(bus.dlq_events, [])
+
+    async def test_explicit_failed_delivery_result_enters_failure_path(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"failed-delivery-user-{uuid4().hex[:8]}"
+        event = InboundActorEvent(
+            event_id="evt-failed-delivery",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "hello"},
+            source_message_id="1-failed",
+        )
+
+        async def generate_reply(turn):
+            return "ok"
+
+        async def deliver_reply(turn, reply):
+            return {"status": "failed", "sent_chunks": 0}
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=0,
+            bus=bus,
+        )
+        await service.enqueue_event(event)
+        await self._wait_for_actor_quiescent(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+        )
+
+        self.assertEqual(len(bus.dlq_events), 1)
+        self.assertEqual(bus.acked, ["1-failed"])
+
     def test_delivery_completed_requires_sent_chunks_for_explicit_status_results(self):
         self.assertFalse(InboundActorService._delivery_completed({"status": "sent", "sent_chunks": 0}))
         self.assertTrue(InboundActorService._delivery_completed({"status": "sent", "sent_chunks": 1}))
+        self.assertTrue(InboundActorService._delivery_completed({"status": "sent"}))
 
     async def test_failed_event_retries_with_backoff_then_dlq_and_ack(self):
         bus = FakeRedisStreamBus()

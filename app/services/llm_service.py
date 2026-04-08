@@ -415,14 +415,14 @@ class GLMService:
         return cleaned[:80]
 
     def plan_reply_chunks(self, reply_text: str, chunk_min: int = 1, chunk_max: int = 3) -> List[str]:
-        cleaned = " ".join(str(reply_text or "").split())
-        if not cleaned:
+        original = str(reply_text or "")
+        if not original.strip():
             return []
 
         normalized_min = max(1, int(chunk_min or 1))
         normalized_max = max(normalized_min, int(chunk_max or normalized_min))
-        fragments = self._split_reply_fragments(cleaned)
-        target_count = self._choose_chunk_count(cleaned, fragments, normalized_min, normalized_max)
+        fragments = self._split_reply_fragments(original)
+        target_count = self._choose_chunk_count(original, fragments, normalized_min, normalized_max)
 
         while len(fragments) < target_count:
             expanded = self._expand_longest_fragment_once(fragments)
@@ -431,12 +431,26 @@ class GLMService:
             fragments = expanded
 
         merged = self._merge_fragments_to_target(fragments, target_count)
-        return [chunk for chunk in merged if chunk]
+        return [chunk for chunk in merged if chunk and chunk.strip()]
 
     def _split_reply_fragments(self, text: str) -> List[str]:
-        sentence_matches = re.findall(r"[^。！？!?\.]+[。！？!?\.]?|[^\s]+", text)
-        fragments = [match.strip() for match in sentence_matches if match and match.strip()]
-        return fragments or [text.strip()]
+        punctuation = {".", "!", "?", "?", "?", "?"}
+        fragments: List[str] = []
+        start = 0
+
+        for index, char in enumerate(text):
+            if char not in punctuation:
+                continue
+            end = index + 1
+            while end < len(text) and text[end].isspace():
+                end += 1
+            fragments.append(text[start:end])
+            start = end
+
+        if start < len(text):
+            fragments.append(text[start:])
+
+        return [fragment for fragment in fragments if fragment]
 
     def _choose_chunk_count(self, text: str, fragments: List[str], chunk_min: int, chunk_max: int) -> int:
         estimated = max(1, (len(text) + 39) // 40)
@@ -457,14 +471,14 @@ class GLMService:
         return [*fragments[:index], *parts, *fragments[index + 1 :]]
 
     def _split_plain_fragment_once(self, fragment: str) -> List[str]:
-        separators = [",", ";", ":", "，", "；", "：", " "]
+        separators = [",", ";", ":", "?", "?", "?", " "]
         midpoint = len(fragment) // 2
         best_split = -1
         split_separator = ""
 
         for separator in separators:
             candidates = [fragment.find(separator, midpoint), fragment.rfind(separator, 0, midpoint)]
-            candidates = [candidate for candidate in candidates if candidate > 0]
+            candidates = [candidate for candidate in candidates if 0 < candidate < len(fragment)]
             if not candidates:
                 continue
             candidate = min(candidates, key=lambda position: abs(position - midpoint))
@@ -476,13 +490,13 @@ class GLMService:
             best_split = midpoint
             split_separator = ""
 
-        split_offset = len(split_separator) if split_separator else 0
-        left = fragment[:best_split].strip(" ,;:，；：")
-        right = fragment[best_split + split_offset :].strip(" ,;:，；：")
+        split_index = best_split + (len(split_separator) if split_separator else 0)
+        left = fragment[:split_index]
+        right = fragment[split_index:]
         if not left or not right:
             hard_midpoint = max(1, midpoint)
-            left = fragment[:hard_midpoint].strip()
-            right = fragment[hard_midpoint:].strip()
+            left = fragment[:hard_midpoint]
+            right = fragment[hard_midpoint:]
         return [part for part in [left, right] if part]
 
     def _merge_fragments_to_target(self, fragments: List[str], target_count: int) -> List[str]:
@@ -506,7 +520,7 @@ class GLMService:
                 current_size += len(next_fragment)
                 if len(remaining) == min_remaining:
                     break
-            merged.append(" ".join(current_parts).strip())
+            merged.append("".join(current_parts))
         return [chunk for chunk in merged if chunk]
 
     async def analyze_emotion(self, text: str) -> Dict[str, float]:
