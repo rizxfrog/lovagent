@@ -88,8 +88,27 @@ class RuntimeConfigService:
         self._cache_expire_at: float = 0.0
 
     @staticmethod
+    def _resolve_default_model_provider() -> tuple[str, str]:
+        env_model_provider = str(settings.model_provider or "glm").strip().lower()
+        if env_model_provider in {"openai", "openai_compatible"}:
+            return "openai", "openai"
+        return "zhipu", "glm"
+
+    @staticmethod
+    def _legacy_model_provider_for(provider_id: str) -> str:
+        normalized = str(provider_id or "").strip().lower()
+        if normalized == "zhipu":
+            return "glm"
+        if normalized == "openai":
+            return "openai"
+        return get_provider_preset(normalized).transport
+
+    @staticmethod
     def _default_model_section() -> Dict:
         defaults = deepcopy(DEFAULT_RUNTIME_CONFIG["model"])
+        default_provider_id, default_model_provider = RuntimeConfigService._resolve_default_model_provider()
+        defaults["provider_id"] = default_provider_id
+        defaults["model_provider"] = default_model_provider
         defaults["openai_base_url"] = settings.openai_base_url
         defaults["openai_model"] = settings.openai_model
         return defaults
@@ -103,21 +122,33 @@ class RuntimeConfigService:
     def _normalize_model_section(self, incoming: Dict | None) -> Dict:
         defaults = self._default_model_section()
         source = incoming if isinstance(incoming, dict) else {}
-        model_provider = str(source.get("model_provider", defaults["model_provider"]) or defaults["model_provider"]).strip()
-        provider_id = source.get("provider_id")
-        if model_provider:
-            provider_id = None
+        explicit_provider_id = str(source.get("provider_id") or "").strip().lower()
+        explicit_model_provider = str(source.get("model_provider") or "").strip().lower()
+        provider_base_url = str(source.get("provider_base_url", defaults["provider_base_url"]) or "").strip()
+        openai_base_url = str(source.get("openai_base_url", defaults["openai_base_url"]) or "").strip()
+        has_provider_signal = bool(explicit_provider_id or explicit_model_provider or provider_base_url or openai_base_url)
 
-        defaults["provider_id"] = infer_provider_id(
-            {
-                "provider_id": provider_id,
-                "model_provider": model_provider,
-                "provider_base_url": source.get("provider_base_url", defaults["provider_base_url"]),
-                "openai_base_url": source.get("openai_base_url", defaults["openai_base_url"]),
-            }
-        )
+        if has_provider_signal:
+            provider_id = infer_provider_id(
+                {
+                    "provider_id": explicit_provider_id or None,
+                    "model_provider": explicit_model_provider or None,
+                    "provider_base_url": provider_base_url,
+                    "openai_base_url": openai_base_url,
+                }
+            )
+        else:
+            provider_id = str(defaults["provider_id"]).strip().lower()
+        if explicit_model_provider:
+            model_provider = explicit_model_provider
+        elif explicit_provider_id:
+            model_provider = self._legacy_model_provider_for(provider_id)
+        else:
+            model_provider = str(defaults["model_provider"]).strip()
+
+        defaults["provider_id"] = provider_id
         defaults["provider_api_key"] = str(source.get("provider_api_key", defaults["provider_api_key"]) or "")
-        defaults["provider_base_url"] = str(source.get("provider_base_url", defaults["provider_base_url"]) or "")
+        defaults["provider_base_url"] = provider_base_url
         defaults["text_model_override"] = str(source.get("text_model_override", defaults["text_model_override"]) or "")
         defaults["multimodal_model_override"] = str(
             source.get("multimodal_model_override", defaults["multimodal_model_override"]) or ""
@@ -137,7 +168,7 @@ class RuntimeConfigService:
             source.get("multimodal_model", defaults["multimodal_model"]) or defaults["multimodal_model"]
         )
         defaults["openai_api_key"] = str(source.get("openai_api_key", defaults["openai_api_key"]) or "")
-        defaults["openai_base_url"] = str(source.get("openai_base_url", defaults["openai_base_url"]) or "")
+        defaults["openai_base_url"] = openai_base_url
         defaults["openai_model_mode"] = str(
             source.get("openai_model_mode", defaults["openai_model_mode"]) or defaults["openai_model_mode"]
         )
@@ -219,6 +250,10 @@ class RuntimeConfigService:
             defaults["actor_debounce_ms"] = max(0, defaults["actor_debounce_ms"])
         if defaults["actor_max_messages_per_turn"] is not None:
             defaults["actor_max_messages_per_turn"] = max(1, defaults["actor_max_messages_per_turn"])
+        if defaults["actor_first_reply_delay_ms"] is not None:
+            defaults["actor_first_reply_delay_ms"] = max(0, defaults["actor_first_reply_delay_ms"])
+        if defaults["actor_chunk_delay_ms"] is not None:
+            defaults["actor_chunk_delay_ms"] = max(0, defaults["actor_chunk_delay_ms"])
         if defaults["actor_reply_chunk_min"] is not None:
             defaults["actor_reply_chunk_min"] = max(1, defaults["actor_reply_chunk_min"])
         if defaults["actor_reply_chunk_max"] is not None:
@@ -226,6 +261,8 @@ class RuntimeConfigService:
             defaults["actor_reply_chunk_max"] = max(chunk_min, defaults["actor_reply_chunk_max"])
         if defaults["actor_retry_max_attempts"] is not None:
             defaults["actor_retry_max_attempts"] = max(0, defaults["actor_retry_max_attempts"])
+        if defaults["actor_retry_backoff_base_ms"] is not None:
+            defaults["actor_retry_backoff_base_ms"] = max(0, defaults["actor_retry_backoff_base_ms"])
         return defaults
 
     def get_config(self) -> Dict:
@@ -291,7 +328,12 @@ class RuntimeConfigService:
             current.setdefault(section, {})
             current[section].update(payload)
             if section == "model":
-                current[section] = self._normalize_model_section(current[section])
+                normalized_model_input = deepcopy(current[section])
+                if "provider_id" in payload and "model_provider" not in payload:
+                    normalized_model_input.pop("model_provider", None)
+                if "model_provider" in payload and "provider_id" not in payload:
+                    normalized_model_input.pop("provider_id", None)
+                current[section] = self._normalize_model_section(normalized_model_input)
             elif section == "channels_actor":
                 current[section] = self._normalize_actor_section(current[section])
             record.config_value = current
@@ -516,9 +558,12 @@ class RuntimeConfigService:
 
         actor_debounce_ms = max(0, actor_debounce_ms)
         actor_max_messages_per_turn = max(1, actor_max_messages_per_turn)
+        actor_first_reply_delay_ms = max(0, actor_first_reply_delay_ms)
+        actor_chunk_delay_ms = max(0, actor_chunk_delay_ms)
         actor_reply_chunk_min = max(1, actor_reply_chunk_min)
         actor_reply_chunk_max = max(actor_reply_chunk_min, actor_reply_chunk_max)
         actor_retry_max_attempts = max(0, actor_retry_max_attempts)
+        actor_retry_backoff_base_ms = max(0, actor_retry_backoff_base_ms)
 
         return {
             "redis_url": str(actor.get("redis_url") or settings.redis_url).strip(),

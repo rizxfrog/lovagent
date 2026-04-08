@@ -171,6 +171,28 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("personality_metrics", payload)
         self.assertNotIn("_response_preferences", payload["persona_core"])
 
+    def test_actor_settings_requires_admin_auth(self):
+        get_response = self.client.get("/admin-api/actor-settings")
+        self.assertEqual(get_response.status_code, 401)
+
+        put_response = self.client.put(
+            "/admin-api/actor-settings",
+            json={
+                "redis_url": "redis://runtime.example.com:6379/2",
+                "redis_password": "runtime-secret",
+                "actor_pipeline_enabled": False,
+                "actor_debounce_ms": 2400,
+                "actor_max_messages_per_turn": 10,
+                "actor_first_reply_delay_ms": 300,
+                "actor_chunk_delay_ms": 200,
+                "actor_reply_chunk_min": 1,
+                "actor_reply_chunk_max": 5,
+                "actor_retry_max_attempts": 3,
+                "actor_retry_backoff_base_ms": 300,
+            },
+        )
+        self.assertEqual(put_response.status_code, 401)
+
     def test_persona_save_and_preview_prompt(self):
         self.login()
         payload = {

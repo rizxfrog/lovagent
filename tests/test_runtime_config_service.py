@@ -35,6 +35,7 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             record.config_value = deepcopy(self.runtime_snapshot)
 
         self.db.commit()
+        runtime_config_service.invalidate_cache()
         self.db.close()
 
     def _clear_runtime_config(self):
@@ -46,6 +47,7 @@ class RuntimeConfigServiceTests(unittest.TestCase):
         if record:
             self.db.delete(record)
             self.db.commit()
+        runtime_config_service.invalidate_cache()
 
     def test_effective_config_prefers_runtime_values_and_falls_back_to_env(self):
         self._clear_runtime_config()
@@ -86,34 +88,35 @@ class RuntimeConfigServiceTests(unittest.TestCase):
 
     def test_status_payload_reports_completion_and_callback_url(self):
         self._clear_runtime_config()
-        runtime_config_service.save_section(
-            "model",
-            {
-                "zhipu_api_key": "test-key",
-                "zhipu_model": "glm-5",
-                "zhipu_thinking_type": "disabled",
-            },
-        )
-        runtime_config_service.save_section(
-            "wecom",
-            {
-                "corp_id": "ww-test",
-                "agent_id": "1000002",
-                "secret": "secret-test",
-                "token": "token-test",
-                "encoding_aes_key": "encoding-test",
-            },
-        )
-        runtime_config_service.save_section("deployment", {"public_base_url": "https://demo.trycloudflare.com"})
-        runtime_config_service.save_section("admin", {"password": "secret123"})
+        with patch.object(settings, "model_provider", "glm"):
+            runtime_config_service.save_section(
+                "model",
+                {
+                    "zhipu_api_key": "test-key",
+                    "zhipu_model": "glm-5",
+                    "zhipu_thinking_type": "disabled",
+                },
+            )
+            runtime_config_service.save_section(
+                "wecom",
+                {
+                    "corp_id": "ww-test",
+                    "agent_id": "1000002",
+                    "secret": "secret-test",
+                    "token": "token-test",
+                    "encoding_aes_key": "encoding-test",
+                },
+            )
+            runtime_config_service.save_section("deployment", {"public_base_url": "https://demo.trycloudflare.com"})
+            runtime_config_service.save_section("admin", {"password": "secret123"})
 
-        payload = runtime_config_service.get_status_payload()
+            payload = runtime_config_service.get_status_payload()
 
-        self.assertTrue(payload["setup_completed"])
-        self.assertTrue(payload["sections"]["deployment_configured"])
-        self.assertEqual(payload["current"]["model_provider"], "glm")
-        self.assertEqual(payload["current"]["callback_url"], "https://demo.trycloudflare.com/wecom/callback")
-        self.assertEqual(payload["raw"]["deployment"]["public_base_url"], "https://demo.trycloudflare.com")
+            self.assertTrue(payload["setup_completed"])
+            self.assertTrue(payload["sections"]["deployment_configured"])
+            self.assertEqual(payload["current"]["model_provider"], "glm")
+            self.assertEqual(payload["current"]["callback_url"], "https://demo.trycloudflare.com/wecom/callback")
+            self.assertEqual(payload["raw"]["deployment"]["public_base_url"], "https://demo.trycloudflare.com")
 
     def test_openai_auto_model_config_uses_routed_models(self):
         self._clear_runtime_config()
@@ -163,6 +166,50 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertTrue(payload["current"]["multimodal_configured"])
             self.assertTrue(payload["current"]["has_openai_api_key"])
 
+    def test_provider_id_takes_precedence_when_model_provider_not_sent(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "model_provider", "glm"),
+            patch.object(settings, "openai_api_key", "env-openai-key"),
+            patch.object(settings, "openai_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ):
+            runtime_config_service.save_section(
+                "model",
+                {
+                    "provider_id": "qwen",
+                    "openai_api_key": "qwen-key",
+                    "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "openai_model": "qwen-plus",
+                },
+            )
+
+            raw_model = runtime_config_service.get_config()["model"]
+            effective_model = runtime_config_service.get_effective_model_config()
+
+            self.assertEqual(raw_model["provider_id"], "qwen")
+            self.assertEqual(effective_model["provider_id"], "qwen")
+            self.assertEqual(effective_model["model_provider"], "openai_compatible")
+            self.assertEqual(effective_model["provider_base_url"], "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    def test_env_model_provider_sets_default_provider_when_runtime_config_missing(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "model_provider", "openai_compatible"),
+            patch.object(settings, "openai_api_key", "env-openai-key"),
+            patch.object(settings, "openai_base_url", "https://api.openai.com/v1"),
+            patch.object(settings, "openai_model", "gpt-4o-mini"),
+        ):
+            raw_model = runtime_config_service.get_config()["model"]
+            effective_model = runtime_config_service.get_effective_model_config()
+
+            self.assertEqual(raw_model["provider_id"], "openai")
+            self.assertEqual(raw_model["model_provider"], "openai")
+            self.assertEqual(effective_model["provider_id"], "openai")
+            self.assertEqual(effective_model["model_provider"], "openai_compatible")
+            self.assertEqual(effective_model["openai_api_key"], "env-openai-key")
+
     def test_effective_actor_config_prefers_runtime_values_and_normalizes_bounds(self):
         self._clear_runtime_config()
 
@@ -185,15 +232,16 @@ class RuntimeConfigServiceTests(unittest.TestCase):
                     "actor_pipeline_enabled": False,
                     "actor_debounce_ms": -50,
                     "actor_max_messages_per_turn": 0,
-                    "actor_first_reply_delay_ms": 120,
-                    "actor_chunk_delay_ms": 80,
+                    "actor_first_reply_delay_ms": -120,
+                    "actor_chunk_delay_ms": -80,
                     "actor_reply_chunk_min": 0,
                     "actor_reply_chunk_max": 0,
                     "actor_retry_max_attempts": -2,
-                    "actor_retry_backoff_base_ms": 150,
+                    "actor_retry_backoff_base_ms": -150,
                 },
             )
 
+            normalized_actor = runtime_config_service.get_config()["channels_actor"]
             effective_actor = runtime_config_service.get_effective_actor_config()
 
             self.assertEqual(effective_actor["redis_url"], "redis://env.example.com:6379/0")
@@ -201,12 +249,15 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertFalse(effective_actor["actor_pipeline_enabled"])
             self.assertEqual(effective_actor["actor_debounce_ms"], 0)
             self.assertEqual(effective_actor["actor_max_messages_per_turn"], 1)
-            self.assertEqual(effective_actor["actor_first_reply_delay_ms"], 120)
-            self.assertEqual(effective_actor["actor_chunk_delay_ms"], 80)
+            self.assertEqual(effective_actor["actor_first_reply_delay_ms"], 0)
+            self.assertEqual(effective_actor["actor_chunk_delay_ms"], 0)
             self.assertEqual(effective_actor["actor_reply_chunk_min"], 1)
             self.assertEqual(effective_actor["actor_reply_chunk_max"], 1)
             self.assertEqual(effective_actor["actor_retry_max_attempts"], 0)
-            self.assertEqual(effective_actor["actor_retry_backoff_base_ms"], 150)
+            self.assertEqual(effective_actor["actor_retry_backoff_base_ms"], 0)
+            self.assertEqual(normalized_actor["actor_first_reply_delay_ms"], 0)
+            self.assertEqual(normalized_actor["actor_chunk_delay_ms"], 0)
+            self.assertEqual(normalized_actor["actor_retry_backoff_base_ms"], 0)
 
     def test_actor_config_uses_env_defaults_when_runtime_values_missing(self):
         self._clear_runtime_config()
@@ -242,6 +293,22 @@ class RuntimeConfigServiceTests(unittest.TestCase):
                     "actor_retry_backoff_base_ms": 450,
                 },
             )
+
+    def test_actor_config_clamps_negative_env_defaults_for_timing_fields(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "actor_debounce_ms", -2600),
+            patch.object(settings, "actor_first_reply_delay_ms", -320),
+            patch.object(settings, "actor_chunk_delay_ms", -180),
+            patch.object(settings, "actor_retry_backoff_base_ms", -450),
+        ):
+            effective_actor = runtime_config_service.get_effective_actor_config()
+
+            self.assertEqual(effective_actor["actor_debounce_ms"], 0)
+            self.assertEqual(effective_actor["actor_first_reply_delay_ms"], 0)
+            self.assertEqual(effective_actor["actor_chunk_delay_ms"], 0)
+            self.assertEqual(effective_actor["actor_retry_backoff_base_ms"], 0)
 
 
 if __name__ == "__main__":
