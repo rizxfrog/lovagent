@@ -10,10 +10,25 @@ from app.main import app
 from app.models.admin import RuntimeConfig
 from app.models.database import SessionLocal, init_db
 from app.services.runtime_config_service import RUNTIME_CONFIG_KEY
+from app.services.runtime_config_service import runtime_config_service
 from app.services.setup_service import setup_service
 
 
 class SetupApiTests(unittest.TestCase):
+    EMPTY_CHANNELS_ACTOR_CONFIG = {
+        "redis_url": "",
+        "redis_password": "",
+        "actor_pipeline_enabled": None,
+        "actor_debounce_ms": None,
+        "actor_max_messages_per_turn": None,
+        "actor_first_reply_delay_ms": None,
+        "actor_chunk_delay_ms": None,
+        "actor_reply_chunk_min": None,
+        "actor_reply_chunk_max": None,
+        "actor_retry_max_attempts": None,
+        "actor_retry_backoff_base_ms": None,
+    }
+
     def setUp(self):
         init_db()
         self.db = SessionLocal()
@@ -63,10 +78,27 @@ class SetupApiTests(unittest.TestCase):
             record.config_value = deepcopy(self.runtime_snapshot)
 
         self.db.commit()
+        runtime_config_service.invalidate_cache()
         self.db.close()
         self.settings_patches.close()
         self.lifespan_tunnel_patcher.stop()
         self.client.close()
+
+    def _replace_runtime_section(self, section: str, payload: dict) -> None:
+        record = (
+            self.db.query(RuntimeConfig)
+            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+            .first()
+        )
+        if not record:
+            record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+            self.db.add(record)
+
+        config_value = deepcopy(record.config_value) if isinstance(record.config_value, dict) else {}
+        config_value[section] = deepcopy(payload)
+        record.config_value = config_value
+        self.db.commit()
+        runtime_config_service.invalidate_cache()
 
     def _setup_status_patches(self):
         return (
@@ -95,6 +127,40 @@ class SetupApiTests(unittest.TestCase):
         self.assertIn("raw", payload)
         self.assertIn("tunnel", payload)
         self.assertFalse(payload["setup_completed"])
+
+    def test_setup_status_exposes_actor_settings_without_secret_leakage(self):
+        self._replace_runtime_section("channels_actor", self.EMPTY_CHANNELS_ACTOR_CONFIG)
+        ensure_patch, status_patch = self._setup_status_patches()
+        with (
+            ensure_patch,
+            status_patch,
+            patch.object(settings, "actor_pipeline_enabled", True),
+            patch.object(settings, "redis_url", "redis://token:secret@env.example.com:6379/0?password=query-secret&foo=bar"),
+            patch.object(settings, "redis_password", "env-secret"),
+            patch.object(settings, "actor_debounce_ms", 2400),
+            patch.object(settings, "actor_max_messages_per_turn", 10),
+            patch.object(settings, "actor_first_reply_delay_ms", 300),
+            patch.object(settings, "actor_chunk_delay_ms", 200),
+            patch.object(settings, "actor_reply_chunk_min", 1),
+            patch.object(settings, "actor_reply_chunk_max", 5),
+            patch.object(settings, "actor_retry_max_attempts", 3),
+            patch.object(settings, "actor_retry_backoff_base_ms", 300),
+        ):
+            response = self.client.get("/setup/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        actor = payload["current"]["actor_settings"]
+        self.assertEqual(actor["redis_url"], "redis://env.example.com:6379/0?foo=bar")
+        self.assertTrue(actor["has_redis_password"])
+        self.assertTrue(actor["actor_pipeline_enabled"])
+        self.assertEqual(actor["actor_chunk_delay_ms"], 200)
+        self.assertNotIn("redis_password", actor)
+        self.assertNotIn("@", actor["redis_url"])
+        self.assertNotIn("secret", actor["redis_url"].lower())
+        self.assertTrue(payload["sections"]["actor_configured"])
+        self.assertEqual(payload["raw"]["channels_actor"]["redis_url"], "")
+        self.assertFalse(payload["raw"]["channels_actor"]["has_redis_password"])
 
     def test_setup_config_endpoints_persist_sections(self):
         ensure_patch, status_patch = self._setup_status_patches()

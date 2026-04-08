@@ -446,3 +446,57 @@ flowchart LR
 - 企业微信助手
 - 客服前置问答 Agent
 - 带记忆和多模态能力的个人实验项目
+
+## Actor Pipeline (Redis Stream)
+
+LovAgent also includes an optional inbound actor pipeline for WeCom and NapCat. When enabled, both channels publish normalized inbound events into one unified stream, and the actor worker handles debounce, interrupt, retry, and delivery timing in the background.
+
+### What it does
+
+- Unifies WeCom and NapCat inbound handling behind the same producer/consumer flow
+- Buffers short bursts of messages per user and turns them into one reply turn
+- Interrupts an in-flight generation or delivery when a newer message arrives
+- Delivers replies in small delayed chunks to feel less robotic
+- Falls back to the legacy direct processing path when the actor pipeline is disabled
+
+### How to enable
+
+You can enable it through environment variables in `.env`, or through the admin runtime settings if you already use the setup flow.
+
+```env
+ACTOR_PIPELINE_ENABLED=false
+REDIS_URL=
+REDIS_PASSWORD=
+ACTOR_DEBOUNCE_MS=2400
+ACTOR_MAX_MESSAGES_PER_TURN=10
+ACTOR_FIRST_REPLY_DELAY_MS=300
+ACTOR_CHUNK_DELAY_MS=200
+ACTOR_REPLY_CHUNK_MIN=1
+ACTOR_REPLY_CHUNK_MAX=5
+ACTOR_RETRY_MAX_ATTEMPTS=3
+ACTOR_RETRY_BACKOFF_BASE_MS=300
+```
+
+Recommended rollout:
+
+1. Start with `ACTOR_PIPELINE_ENABLED=false`
+2. Configure `REDIS_URL` and optional `REDIS_PASSWORD`
+3. Turn `ACTOR_PIPELINE_ENABLED=true`
+4. Verify `/setup/status` and `/admin-api/actor-settings`
+
+### Runtime behavior
+
+- `ACTOR_DEBOUNCE_MS`: waits briefly to combine rapid inbound messages into one turn
+- `ACTOR_MAX_MESSAGES_PER_TURN`: limits how many buffered messages are consumed in one reply turn; overflow rolls into the next turn
+- `ACTOR_FIRST_REPLY_DELAY_MS` and `ACTOR_CHUNK_DELAY_MS`: control the initial delay and inter-chunk pacing for human-like delivery
+- `ACTOR_REPLY_CHUNK_MIN` and `ACTOR_REPLY_CHUNK_MAX`: bound how many reply chunks the planner may produce
+- `ACTOR_RETRY_MAX_ATTEMPTS` and `ACTOR_RETRY_BACKOFF_BASE_MS`: control retry count and exponential retry backoff before DLQ
+
+Interrupt behavior is intentional: if a new user message arrives while an older turn is generating or delivering, the older turn is cancelled, its stale version is prevented from sending further chunks, and the newer turn takes over.
+
+### Unified inbound and fallback
+
+- WeCom text messages use the actor producer path when the pipeline is enabled
+- WeCom multimodal messages still use the legacy aggregation path so existing image/file behavior is preserved
+- NapCat messages publish into the same actor pipeline when enabled
+- If actor publish fails for a channel message, LovAgent falls back to the legacy direct path for that message instead of dropping it

@@ -688,6 +688,8 @@ class RuntimeConfigService:
         effective_model = self.get_effective_model_config()
         effective_wecom = self.get_effective_wecom_config()
         effective_napcat = self.get_effective_napcat_config()
+        effective_actor = self.get_effective_actor_config()
+        actor_settings = self.get_actor_settings_payload()
         effective_public_base_url = self.get_effective_public_base_url()
         effective_admin_password = self.get_effective_admin_password()
 
@@ -706,6 +708,7 @@ class RuntimeConfigService:
                     ]
                 ),
                 "napcat_configured": bool(effective_napcat["ws_url"]),
+                "actor_configured": (not effective_actor["actor_pipeline_enabled"]) or bool(effective_actor["redis_url"]),
                 "admin_configured": bool(effective_admin_password),
                 "deployment_configured": bool(effective_public_base_url),
             },
@@ -749,6 +752,7 @@ class RuntimeConfigService:
                 "has_wecom_encoding_aes_key": bool(effective_wecom["encoding_aes_key"]),
                 "napcat_ws_url": effective_napcat["ws_url"],
                 "has_napcat_ws_token": bool(effective_napcat["ws_token"]),
+                "actor_settings": actor_settings,
                 "has_admin_password": bool(effective_admin_password),
             },
             "raw": {
@@ -780,6 +784,19 @@ class RuntimeConfigService:
                 "napcat": {
                     "ws_url": raw["napcat"]["ws_url"],
                     "has_ws_token": bool(raw["napcat"]["ws_token"]),
+                },
+                "channels_actor": {
+                    "redis_url": self._sanitize_actor_redis_url(raw["channels_actor"]["redis_url"]),
+                    "has_redis_password": bool(raw["channels_actor"]["redis_password"]),
+                    "actor_pipeline_enabled": raw["channels_actor"]["actor_pipeline_enabled"],
+                    "actor_debounce_ms": raw["channels_actor"]["actor_debounce_ms"],
+                    "actor_max_messages_per_turn": raw["channels_actor"]["actor_max_messages_per_turn"],
+                    "actor_first_reply_delay_ms": raw["channels_actor"]["actor_first_reply_delay_ms"],
+                    "actor_chunk_delay_ms": raw["channels_actor"]["actor_chunk_delay_ms"],
+                    "actor_reply_chunk_min": raw["channels_actor"]["actor_reply_chunk_min"],
+                    "actor_reply_chunk_max": raw["channels_actor"]["actor_reply_chunk_max"],
+                    "actor_retry_max_attempts": raw["channels_actor"]["actor_retry_max_attempts"],
+                    "actor_retry_backoff_base_ms": raw["channels_actor"]["actor_retry_backoff_base_ms"],
                 },
                 "deployment": {
                     "public_base_url": raw["deployment"]["public_base_url"],
