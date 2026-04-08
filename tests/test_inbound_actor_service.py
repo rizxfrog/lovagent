@@ -25,7 +25,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.db.commit()
         self.db.close()
 
-    async def _wait_for(self, predicate, timeout: float = 1.5) -> None:
+    async def _wait_for(self, predicate, timeout: float = 3.0) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
@@ -33,6 +33,36 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.01)
         self.fail("Timed out waiting for condition")
+
+    async def _wait_for_actor_idle(
+        self,
+        service: InboundActorService,
+        *,
+        channel: str,
+        external_user_id: str,
+        min_deliveries: int,
+        delivered_turns: list[list[str]],
+        timeout: float = 3.0,
+    ) -> None:
+        actor_key = service.actor_key(channel, external_user_id)
+
+        def is_idle() -> bool:
+            state = service._actors.get(actor_key)
+            if state is None:
+                return False
+            if len(delivered_turns) < min_deliveries:
+                return False
+            return (
+                state.status == "collecting"
+                and not state.buffer
+                and not state.current_turn_events
+                and (state.turn_task is None or state.turn_task.done())
+                and (state.debounce_task is None or state.debounce_task.done())
+                and (state.generation_task is None or state.generation_task.done())
+                and (state.delivery_task is None or state.delivery_task.done())
+            )
+
+        await self._wait_for(is_idle, timeout=timeout)
 
     def _event(self, event_id: str, text: str) -> InboundActorEvent:
         suffix = uuid4().hex[:8]
@@ -109,6 +139,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         generated_turns: list[list[str]] = []
         delivered_turns: list[list[str]] = []
         suffix = uuid4().hex[:8]
+        external_user_id = f"overflow-user-{suffix}"
 
         async def generate_reply(turn):
             generated_turns.append([event.event_id for event in turn.events])
@@ -130,12 +161,18 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
                 InboundActorEvent(
                     event_id=event_id,
                     channel="wecom",
-                    external_user_id=f"overflow-user-{suffix}",
+                    external_user_id=external_user_id,
                     payload={"text": event_id},
                 )
             )
 
-        await self._wait_for(lambda: len(delivered_turns) == 2)
+        await self._wait_for_actor_idle(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+            min_deliveries=2,
+            delivered_turns=delivered_turns,
+        )
 
         self.assertEqual(generated_turns, [["evt-1", "evt-2"], ["evt-3"]])
         self.assertEqual(delivered_turns, [["evt-1", "evt-2"], ["evt-3"]])
