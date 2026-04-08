@@ -1,8 +1,10 @@
+import ast
 import unittest
 from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.main import app
@@ -31,8 +33,22 @@ class AdminApiTests(unittest.TestCase):
         "actor_retry_backoff_base_ms": None,
     }
 
+    @staticmethod
+    def _coerce_response_preferences(value) -> dict:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = ast.literal_eval(value.strip())
+            except (ValueError, SyntaxError):
+                return {}
+            if isinstance(parsed, dict):
+                return dict(parsed)
+        return {}
+
     def setUp(self):
         init_db()
+        runtime_config_service.invalidate_cache()
         self.db = SessionLocal()
         self.original_persona = (
             self.db.query(AgentConfig)
@@ -48,7 +64,9 @@ class AdminApiTests(unittest.TestCase):
                 "topics_to_avoid": list(self.original_persona.topics_to_avoid or []),
                 "recommended_topics": list(self.original_persona.recommended_topics or []),
                 "response_rules": list(self.original_persona.response_rules or []),
-                "response_preferences": dict((self.original_persona.persona_core or {}).get("_response_preferences") or {}),
+                "response_preferences": self._coerce_response_preferences(
+                    (self.original_persona.persona_core or {}).get("_response_preferences")
+                ),
             }
         else:
             self.original_persona_snapshot = None
@@ -142,22 +160,7 @@ class AdminApiTests(unittest.TestCase):
             self.db.delete(current_proactive)
             self.db.commit()
 
-        current_runtime_config = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if self.original_runtime_config_snapshot is not None:
-            if not current_runtime_config:
-                current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY)
-                self.db.add(current_runtime_config)
-            current_runtime_config.config_value = deepcopy(self.original_runtime_config_snapshot)
-            self.db.commit()
-            runtime_config_service.invalidate_cache()
-        elif current_runtime_config:
-            self.db.delete(current_runtime_config)
-            self.db.commit()
-            runtime_config_service.invalidate_cache()
+        self._restore_runtime_snapshot()
 
         self.db.query(ProactiveChatLog).filter(ProactiveChatLog.target_wecom_user_id.in_(["test-user", "user-1"])).delete(
             synchronize_session=False
@@ -169,25 +172,69 @@ class AdminApiTests(unittest.TestCase):
         self.runtime_password_patcher.stop()
         self.client.close()
 
+    def _restore_runtime_snapshot(self) -> None:
+        restore_session = SessionLocal()
+        try:
+            restore_session.rollback()
+            runtime_config_service.invalidate_cache()
+            current_runtime_config = (
+                restore_session.query(RuntimeConfig)
+                .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                .first()
+            )
+            if self.original_runtime_config_snapshot is not None:
+                if not current_runtime_config:
+                    current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+                    restore_session.add(current_runtime_config)
+                current_runtime_config.config_value = deepcopy(self.original_runtime_config_snapshot)
+            elif current_runtime_config:
+                restore_session.delete(current_runtime_config)
+            restore_session.commit()
+        finally:
+            restore_session.close()
+            runtime_config_service.invalidate_cache()
+            self.db.rollback()
+            self.db.expire_all()
+
     def login(self):
         response = self.client.post("/admin-api/auth/login", json={"password": "test-admin"})
         self.assertEqual(response.status_code, 200)
 
     def _replace_runtime_section(self, section: str, payload: dict) -> None:
-        current_runtime_config = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if not current_runtime_config:
-            current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
-            self.db.add(current_runtime_config)
-
-        config_value = deepcopy(current_runtime_config.config_value) if isinstance(current_runtime_config.config_value, dict) else {}
-        config_value[section] = deepcopy(payload)
-        current_runtime_config.config_value = config_value
-        self.db.commit()
         runtime_config_service.invalidate_cache()
+        self.db.rollback()
+        self.db.expire_all()
+        for _ in range(2):
+            session = SessionLocal()
+            try:
+                current_runtime_config = (
+                    session.query(RuntimeConfig)
+                    .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                    .first()
+                )
+                if not current_runtime_config:
+                    current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+                    session.add(current_runtime_config)
+
+                config_value = (
+                    deepcopy(current_runtime_config.config_value)
+                    if isinstance(current_runtime_config.config_value, dict)
+                    else {}
+                )
+                config_value[section] = deepcopy(payload)
+                current_runtime_config.config_value = config_value
+                session.commit()
+                break
+            except IntegrityError:
+                session.rollback()
+                continue
+            finally:
+                session.close()
+        else:
+            self.fail("failed to upsert runtime config section")
+        runtime_config_service.invalidate_cache()
+        self.db.rollback()
+        self.db.expire_all()
 
     def test_login_and_persona_read(self):
         unauthorized = self.client.get("/admin-api/persona")

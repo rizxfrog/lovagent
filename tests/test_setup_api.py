@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.config import settings
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app.main import app
 from app.models.admin import RuntimeConfig
@@ -31,6 +32,7 @@ class SetupApiTests(unittest.TestCase):
 
     def setUp(self):
         init_db()
+        runtime_config_service.invalidate_cache()
         self.db = SessionLocal()
         existing = (
             self.db.query(RuntimeConfig)
@@ -41,6 +43,7 @@ class SetupApiTests(unittest.TestCase):
         if existing:
             self.db.delete(existing)
             self.db.commit()
+        runtime_config_service.invalidate_cache()
 
         self.settings_patches = contextlib.ExitStack()
         self.settings_patches.enter_context(patch.object(settings, "model_provider", "glm"))
@@ -56,6 +59,17 @@ class SetupApiTests(unittest.TestCase):
         self.settings_patches.enter_context(patch.object(settings, "wecom_token", ""))
         self.settings_patches.enter_context(patch.object(settings, "wecom_encoding_aes_key", ""))
         self.settings_patches.enter_context(patch.object(settings, "public_base_url", ""))
+        self.settings_patches.enter_context(patch.object(settings, "redis_url", ""))
+        self.settings_patches.enter_context(patch.object(settings, "redis_password", ""))
+        self.settings_patches.enter_context(patch.object(settings, "actor_pipeline_enabled", False))
+        self.settings_patches.enter_context(patch.object(settings, "actor_debounce_ms", 2400))
+        self.settings_patches.enter_context(patch.object(settings, "actor_max_messages_per_turn", 10))
+        self.settings_patches.enter_context(patch.object(settings, "actor_first_reply_delay_ms", 300))
+        self.settings_patches.enter_context(patch.object(settings, "actor_chunk_delay_ms", 200))
+        self.settings_patches.enter_context(patch.object(settings, "actor_reply_chunk_min", 1))
+        self.settings_patches.enter_context(patch.object(settings, "actor_reply_chunk_max", 5))
+        self.settings_patches.enter_context(patch.object(settings, "actor_retry_max_attempts", 3))
+        self.settings_patches.enter_context(patch.object(settings, "actor_retry_backoff_base_ms", 300))
         self.settings_patches.enter_context(patch.object(settings, "admin_password", ""))
         self.settings_patches.enter_context(patch.object(settings, "server_host", "127.0.0.1"))
         self.lifespan_tunnel_patcher = patch("app.main.tunnel_service.ensure_started", return_value=None)
@@ -63,42 +77,65 @@ class SetupApiTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def tearDown(self):
-        record = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if self.runtime_snapshot is None:
-            if record:
-                self.db.delete(record)
-        else:
-            if not record:
-                record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY)
-                self.db.add(record)
-            record.config_value = deepcopy(self.runtime_snapshot)
+        restore_session = SessionLocal()
+        try:
+            restore_session.rollback()
+            record = (
+                restore_session.query(RuntimeConfig)
+                .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                .first()
+            )
+            if self.runtime_snapshot is None:
+                if record:
+                    restore_session.delete(record)
+            else:
+                if not record:
+                    record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+                    restore_session.add(record)
+                record.config_value = deepcopy(self.runtime_snapshot)
 
-        self.db.commit()
-        runtime_config_service.invalidate_cache()
+            restore_session.commit()
+        finally:
+            restore_session.close()
+            runtime_config_service.invalidate_cache()
+            self.db.rollback()
+            self.db.expire_all()
         self.db.close()
         self.settings_patches.close()
         self.lifespan_tunnel_patcher.stop()
         self.client.close()
 
     def _replace_runtime_section(self, section: str, payload: dict) -> None:
-        record = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if not record:
-            record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
-            self.db.add(record)
-
-        config_value = deepcopy(record.config_value) if isinstance(record.config_value, dict) else {}
-        config_value[section] = deepcopy(payload)
-        record.config_value = config_value
-        self.db.commit()
         runtime_config_service.invalidate_cache()
+        self.db.rollback()
+        self.db.expire_all()
+        for _ in range(2):
+            session = SessionLocal()
+            try:
+                record = (
+                    session.query(RuntimeConfig)
+                    .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                    .first()
+                )
+                if not record:
+                    record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+                    session.add(record)
+
+                config_value = deepcopy(record.config_value) if isinstance(record.config_value, dict) else {}
+                config_value[section] = deepcopy(payload)
+                record.config_value = config_value
+                session.commit()
+                break
+            except IntegrityError:
+                session.rollback()
+                continue
+            finally:
+                session.close()
+        else:
+            self.fail("failed to upsert runtime config section")
+        runtime_config_service.invalidate_cache()
+        self.db.rollback()
+        self.db.expire_all()
 
     def _setup_status_patches(self):
         return (

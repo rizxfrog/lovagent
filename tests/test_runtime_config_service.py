@@ -11,6 +11,7 @@ from app.services.runtime_config_service import RUNTIME_CONFIG_KEY, runtime_conf
 class RuntimeConfigServiceTests(unittest.TestCase):
     def setUp(self):
         init_db()
+        runtime_config_service.invalidate_cache()
         self.db = SessionLocal()
         existing = (
             self.db.query(RuntimeConfig)
@@ -18,36 +19,53 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             .first()
         )
         self.runtime_snapshot = deepcopy(existing.config_value) if existing else None
+        self.db.rollback()
+        self.db.expire_all()
 
     def tearDown(self):
-        record = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if self.runtime_snapshot is None:
-            if record:
-                self.db.delete(record)
-        else:
-            if not record:
-                record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY)
-                self.db.add(record)
-            record.config_value = deepcopy(self.runtime_snapshot)
+        restore_session = SessionLocal()
+        try:
+            restore_session.rollback()
+            record = (
+                restore_session.query(RuntimeConfig)
+                .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                .first()
+            )
+            if self.runtime_snapshot is None:
+                if record:
+                    restore_session.delete(record)
+            else:
+                if not record:
+                    record = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+                    restore_session.add(record)
+                record.config_value = deepcopy(self.runtime_snapshot)
 
-        self.db.commit()
-        runtime_config_service.invalidate_cache()
+            restore_session.commit()
+        finally:
+            restore_session.close()
+            runtime_config_service.invalidate_cache()
+            self.db.rollback()
+            self.db.expire_all()
         self.db.close()
 
     def _clear_runtime_config(self):
-        record = (
-            self.db.query(RuntimeConfig)
-            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
-            .first()
-        )
-        if record:
-            self.db.delete(record)
-            self.db.commit()
-        runtime_config_service.invalidate_cache()
+        session = SessionLocal()
+        try:
+            record = (
+                session.query(RuntimeConfig)
+                .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+                .first()
+            )
+            if record:
+                session.delete(record)
+                session.commit()
+            else:
+                session.rollback()
+        finally:
+            session.close()
+            runtime_config_service.invalidate_cache()
+            self.db.rollback()
+            self.db.expire_all()
 
     def test_effective_config_prefers_runtime_values_and_falls_back_to_env(self):
         self._clear_runtime_config()

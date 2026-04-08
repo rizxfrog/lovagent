@@ -53,7 +53,12 @@ class SetupService:
         status["current"]["public_base_url"] = resolved_public_base_url
         status["current"]["callback_url"] = self._build_callback_url(resolved_public_base_url)
         status["sections"]["deployment_configured"] = bool(resolved_public_base_url)
-        status["setup_completed"] = all(status["sections"].values())
+        required_sections = {
+            key: value
+            for key, value in status["sections"].items()
+            if key != "actor_configured"
+        }
+        status["setup_completed"] = all(required_sections.values())
         return status
 
     async def validate(self) -> Dict:
