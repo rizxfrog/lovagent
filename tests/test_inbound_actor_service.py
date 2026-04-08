@@ -112,6 +112,32 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self._wait_for(is_idle, timeout=timeout)
 
+    async def _wait_for_actor_quiescent(
+        self,
+        service: InboundActorService,
+        *,
+        channel: str,
+        external_user_id: str,
+        timeout: float = 12.0,
+    ) -> None:
+        actor_key = service.actor_key(channel, external_user_id)
+
+        def is_quiescent() -> bool:
+            state = service._actors.get(actor_key)
+            if state is None:
+                return False
+            return (
+                state.status == "collecting"
+                and not state.buffer
+                and not state.current_turn_events
+                and (state.turn_task is None or state.turn_task.done())
+                and (state.debounce_task is None or state.debounce_task.done())
+                and (state.generation_task is None or state.generation_task.done())
+                and (state.delivery_task is None or state.delivery_task.done())
+            )
+
+        await self._wait_for(is_quiescent, timeout=timeout)
+
     def _event(self, event_id: str, text: str) -> InboundActorEvent:
         suffix = uuid4().hex[:8]
         return InboundActorEvent(
@@ -326,13 +352,12 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_event_retries_with_backoff_then_dlq_and_ack(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"retry-user-{uuid4().hex[:8]}"
-        bus.new_messages.append(
-            self._envelope(
-                message_id="2-0",
-                event_id="evt-retry",
-                external_user_id=external_user_id,
-                text="retry me",
-            )
+        event = InboundActorEvent(
+            event_id="evt-retry",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "retry me"},
+            source_message_id="2-0",
         )
         attempt_times: list[float] = []
 
@@ -350,11 +375,16 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
             retry_backoff_base_ms=50,
             bus=bus,
         )
-        await service.start()
+        await service.enqueue_event(event)
+        await self._wait_for_actor_quiescent(
+            service,
+            channel="wecom",
+            external_user_id=external_user_id,
+        )
 
-        await self._wait_for(lambda: len(bus.dlq_events) == 1 and bus.acked == ["2-0"], timeout=8.0)
-
-        self.assertGreaterEqual(len(attempt_times), 2)
+        self.assertEqual(len(bus.dlq_events), 1)
+        self.assertEqual(bus.acked, ["2-0"])
+        self.assertEqual(len(attempt_times), 2)
         self.assertGreaterEqual(attempt_times[1] - attempt_times[0], 0.045)
         self.assertEqual(bus.dlq_events[0].event.event_id, "evt-retry")
         self.assertEqual(bus.dlq_events[0].reason, "turn_failure")
