@@ -7,6 +7,10 @@ from importlib import import_module
 __all__ = [
     "WeComService",
     "wecom_service",
+    "RedisStreamBus",
+    "InboundActorEvent",
+    "InboundActorService",
+    "inbound_actor_service",
     "GLMService",
     "glm_service",
     "EmotionEngine",
@@ -31,6 +35,10 @@ __all__ = [
 _SERVICE_EXPORTS = {
     "WeComService": ("app.services.wecom_service", "WeComService"),
     "wecom_service": ("app.services.wecom_service", "wecom_service"),
+    "RedisStreamBus": ("app.services.redis_stream_bus", "RedisStreamBus"),
+    "InboundActorEvent": ("app.services.redis_stream_bus", "InboundActorEvent"),
+    "InboundActorService": ("app.services.inbound_actor_service", "InboundActorService"),
+    "inbound_actor_service": ("app.services.inbound_actor_service", "inbound_actor_service"),
     "GLMService": ("app.services.llm_service", "GLMService"),
     "glm_service": ("app.services.llm_service", "glm_service"),
     "EmotionEngine": ("app.services.emotion_engine", "EmotionEngine"),

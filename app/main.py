@@ -16,9 +16,11 @@ from starlette.staticfiles import StaticFiles
 from app.config import settings
 from app.models.database import init_db
 from app.routers import admin, setup, wecom
+from app.services.inbound_actor_service import inbound_actor_service
 from app.services.napcat_service import napcat_service
 from app.services.proactive_chat_service import proactive_chat_service
 from app.services.public_media_service import PUBLIC_MEDIA_DIR, PUBLIC_MEDIA_ROUTE
+from app.services.runtime_config_service import runtime_config_service
 from app.services.tunnel_service import (
     is_invalid_autodetected_tunnel_url,
     is_quick_tunnel_url,
@@ -67,6 +69,9 @@ async def lifespan(app: FastAPI):
     logger.info("企业微信回调地址: %s", callback_url)
     await napcat_service.start()
     proactive_scheduler_task = asyncio.create_task(proactive_chat_service.scheduler_loop())
+    actor_config = runtime_config_service.get_effective_actor_config()
+    if actor_config["actor_pipeline_enabled"]:
+        await inbound_actor_service.start()
 
     yield
 
@@ -75,6 +80,7 @@ async def lifespan(app: FastAPI):
         await proactive_scheduler_task
     except asyncio.CancelledError:
         pass
+    await inbound_actor_service.stop()
     await napcat_service.stop()
     logger.info("恋爱 Agent 关闭中...")
 
