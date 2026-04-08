@@ -17,6 +17,20 @@ from app.services.runtime_config_service import RUNTIME_CONFIG_KEY, runtime_conf
 
 
 class AdminApiTests(unittest.TestCase):
+    EMPTY_CHANNELS_ACTOR_CONFIG = {
+        "redis_url": "",
+        "redis_password": "",
+        "actor_pipeline_enabled": None,
+        "actor_debounce_ms": None,
+        "actor_max_messages_per_turn": None,
+        "actor_first_reply_delay_ms": None,
+        "actor_chunk_delay_ms": None,
+        "actor_reply_chunk_min": None,
+        "actor_reply_chunk_max": None,
+        "actor_retry_max_attempts": None,
+        "actor_retry_backoff_base_ms": None,
+    }
+
     def setUp(self):
         init_db()
         self.db = SessionLocal()
@@ -158,6 +172,22 @@ class AdminApiTests(unittest.TestCase):
     def login(self):
         response = self.client.post("/admin-api/auth/login", json={"password": "test-admin"})
         self.assertEqual(response.status_code, 200)
+
+    def _replace_runtime_section(self, section: str, payload: dict) -> None:
+        current_runtime_config = (
+            self.db.query(RuntimeConfig)
+            .filter(RuntimeConfig.config_key == RUNTIME_CONFIG_KEY)
+            .first()
+        )
+        if not current_runtime_config:
+            current_runtime_config = RuntimeConfig(config_key=RUNTIME_CONFIG_KEY, config_value={})
+            self.db.add(current_runtime_config)
+
+        config_value = deepcopy(current_runtime_config.config_value) if isinstance(current_runtime_config.config_value, dict) else {}
+        config_value[section] = deepcopy(payload)
+        current_runtime_config.config_value = config_value
+        self.db.commit()
+        runtime_config_service.invalidate_cache()
 
     def test_login_and_persona_read(self):
         unauthorized = self.client.get("/admin-api/persona")
@@ -424,6 +454,7 @@ class AdminApiTests(unittest.TestCase):
             patch.object(settings, "actor_retry_max_attempts", 3),
             patch.object(settings, "actor_retry_backoff_base_ms", 300),
         ):
+            self._replace_runtime_section("channels_actor", self.EMPTY_CHANNELS_ACTOR_CONFIG)
             get_response = self.client.get("/admin-api/actor-settings")
             self.assertEqual(get_response.status_code, 200)
             self.assertEqual(get_response.json()["redis_url"], "redis://env.example.com:6379/0")
