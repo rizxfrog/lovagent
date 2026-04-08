@@ -377,6 +377,25 @@ class GLMServiceTests(unittest.TestCase):
         self.assertEqual(len(chunks), 3)
         self.assertEqual(chunks, service.plan_reply_chunks("alpha beta gamma delta epsilon zeta eta theta", 3, 3))
 
+    def test_plain_fragment_midpoint_split_keeps_all_characters_without_separator(self):
+        service = GLMService()
+
+        parts = service._split_plain_fragment_once("abcdefghij")
+
+        self.assertEqual("".join(parts), "abcdefghij")
+
+    def test_plan_reply_chunks_keeps_all_characters_for_chinese_text(self):
+        service = GLMService()
+
+        chunks = service.plan_reply_chunks(
+            "今天真的有点累但是见到你就开心",
+            chunk_min=2,
+            chunk_max=2,
+        )
+
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual("".join(chunks), "今天真的有点累但是见到你就开心")
+
 
 if __name__ == "__main__":
     unittest.main()

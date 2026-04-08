@@ -475,8 +475,10 @@ class InboundActorService:
             async with state.lock:
                 state.delivery_task = delivery_task
             delivered = False
+            delivery_status = "sent"
             try:
                 delivery_result = await delivery_task
+                delivery_status = self._delivery_status_name(delivery_result)
                 delivered = self._delivery_completed(delivery_result)
             except asyncio.CancelledError:
                 pass
@@ -484,6 +486,9 @@ class InboundActorService:
                 async with state.lock:
                     if state.delivery_task is delivery_task:
                         state.delivery_task = None
+
+            if not delivered and delivery_status not in {"sent", "cancelled"}:
+                raise RuntimeError(f"delivery_{delivery_status}")
 
             async with state.lock:
                 if delivered and state.generation_version == turn_version and not self._stopping:
@@ -639,12 +644,26 @@ class InboundActorService:
         return (base_ms * (2**exponent)) / 1000.0
 
     @staticmethod
-    def _delivery_completed(delivery_result: object) -> bool:
+    def _delivery_status_name(delivery_result: object) -> str:
         if isinstance(delivery_result, dict):
-            return str(delivery_result.get("status") or "").strip().lower() == "sent"
+            return str(delivery_result.get("status") or "").strip().lower() or "unknown"
+
         status = getattr(delivery_result, "status", None)
         if isinstance(status, str):
-            return status.strip().lower() == "sent"
+            return status.strip().lower() or "unknown"
+        return "sent"
+
+    @staticmethod
+    def _delivery_completed(delivery_result: object) -> bool:
+        if isinstance(delivery_result, dict):
+            return (
+                str(delivery_result.get("status") or "").strip().lower() == "sent"
+                and int(delivery_result.get("sent_chunks") or 0) > 0
+            )
+        status = getattr(delivery_result, "status", None)
+        if isinstance(status, str):
+            sent_chunks = getattr(delivery_result, "sent_chunks", 0)
+            return status.strip().lower() == "sent" and int(sent_chunks or 0) > 0
         return True
 
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:

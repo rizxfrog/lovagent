@@ -460,6 +460,7 @@ class GLMService:
         separators = [",", ";", ":", "，", "；", "：", " "]
         midpoint = len(fragment) // 2
         best_split = -1
+        split_separator = ""
 
         for separator in separators:
             candidates = [fragment.find(separator, midpoint), fragment.rfind(separator, 0, midpoint)]
@@ -469,12 +470,15 @@ class GLMService:
             candidate = min(candidates, key=lambda position: abs(position - midpoint))
             if best_split < 0 or abs(candidate - midpoint) < abs(best_split - midpoint):
                 best_split = candidate
+                split_separator = separator
 
         if best_split < 0:
             best_split = midpoint
+            split_separator = ""
 
+        split_offset = len(split_separator) if split_separator else 0
         left = fragment[:best_split].strip(" ,;:，；：")
-        right = fragment[best_split + 1 :].strip(" ,;:，；：")
+        right = fragment[best_split + split_offset :].strip(" ,;:，；：")
         if not left or not right:
             hard_midpoint = max(1, midpoint)
             left = fragment[:hard_midpoint].strip()

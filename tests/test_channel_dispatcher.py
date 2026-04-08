@@ -42,6 +42,20 @@ class ChannelDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.sent_chunks, 1)
         self.assertEqual(dispatcher.send_text.await_count, 1)
 
+    async def test_send_text_chunks_returns_not_sent_for_empty_chunks(self):
+        dispatcher = ChannelDispatcher()
+        dispatcher.send_text = AsyncMock(return_value={"status": "sent"})
+
+        result = await dispatcher.send_text_chunks(
+            "wecom",
+            "user-1",
+            [" ", "\n", ""],
+        )
+
+        self.assertEqual(result.status, "not_sent")
+        self.assertEqual(result.sent_chunks, 0)
+        dispatcher.send_text.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

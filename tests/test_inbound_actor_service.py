@@ -423,6 +423,46 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._wait_for(lambda: bus.acked == ["1-0"])
         self.assertEqual(delivered_turns, [["evt-ack"]])
 
+    async def test_whitespace_reply_is_not_treated_as_successful_delivery(self):
+        bus = FakeRedisStreamBus()
+        external_user_id = f"empty-reply-user-{uuid4().hex[:8]}"
+        event = InboundActorEvent(
+            event_id="evt-empty-reply",
+            channel="wecom",
+            external_user_id=external_user_id,
+            payload={"text": "hello"},
+            source_message_id="1-empty",
+        )
+
+        async def generate_reply(turn):
+            return "   "
+
+        async def deliver_reply(turn, reply):
+            return await InboundActorService._default_deliver_reply(service, turn, reply)
+
+        service = self._make_service(
+            generate_reply=generate_reply,
+            deliver_reply=deliver_reply,
+            retry_max_attempts=0,
+            bus=bus,
+        )
+
+        with patch("app.services.inbound_actor_service.channel_dispatcher.send_text", AsyncMock()) as send_mock:
+            await service.enqueue_event(event)
+            await self._wait_for_actor_quiescent(
+                service,
+                channel="wecom",
+                external_user_id=external_user_id,
+            )
+
+        send_mock.assert_not_awaited()
+        self.assertEqual(len(bus.dlq_events), 1)
+        self.assertEqual(bus.acked, ["1-empty"])
+
+    def test_delivery_completed_requires_sent_chunks_for_explicit_status_results(self):
+        self.assertFalse(InboundActorService._delivery_completed({"status": "sent", "sent_chunks": 0}))
+        self.assertTrue(InboundActorService._delivery_completed({"status": "sent", "sent_chunks": 1}))
+
     async def test_failed_event_retries_with_backoff_then_dlq_and_ack(self):
         bus = FakeRedisStreamBus()
         external_user_id = f"retry-user-{uuid4().hex[:8]}"

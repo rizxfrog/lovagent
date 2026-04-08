@@ -17,7 +17,7 @@ GuardFn = Callable[[], bool | Awaitable[bool]]
 @dataclass(frozen=True)
 class ChunkDeliveryResult:
     channel: str
-    status: Literal["sent", "cancelled"]
+    status: Literal["sent", "cancelled", "not_sent"]
     sent_chunks: int
 
 
@@ -48,6 +48,9 @@ class ChannelDispatcher:
     ) -> ChunkDeliveryResult:
         cleaned_chunks = [str(chunk).strip() for chunk in chunks if str(chunk).strip()]
         lowered = (channel or "").strip().lower()
+        if not cleaned_chunks:
+            return ChunkDeliveryResult(channel=lowered, status="not_sent", sent_chunks=0)
+
         sent_chunks = 0
 
         for index, chunk in enumerate(cleaned_chunks):
