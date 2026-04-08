@@ -459,6 +459,8 @@ class AdminApiTests(unittest.TestCase):
             self.assertEqual(get_response.status_code, 200)
             self.assertEqual(get_response.json()["redis_url"], "redis://env.example.com:6379/0")
             self.assertEqual(get_response.json()["actor_reply_chunk_max"], 5)
+            self.assertTrue(get_response.json()["has_redis_password"])
+            self.assertNotIn("redis_password", get_response.json())
 
             payload = {
                 "redis_url": "redis://runtime.example.com:6379/2",
@@ -479,17 +481,64 @@ class AdminApiTests(unittest.TestCase):
             saved = save_response.json()
 
             self.assertEqual(saved["redis_url"], "redis://runtime.example.com:6379/2")
-            self.assertEqual(saved["redis_password"], "runtime-secret")
             self.assertFalse(saved["actor_pipeline_enabled"])
             self.assertEqual(saved["actor_debounce_ms"], 0)
             self.assertEqual(saved["actor_max_messages_per_turn"], 1)
             self.assertEqual(saved["actor_reply_chunk_min"], 1)
             self.assertEqual(saved["actor_reply_chunk_max"], 1)
             self.assertEqual(saved["actor_retry_max_attempts"], 0)
+            self.assertTrue(saved["has_redis_password"])
+            self.assertNotIn("redis_password", saved)
 
             roundtrip_response = self.client.get("/admin-api/actor-settings")
             self.assertEqual(roundtrip_response.status_code, 200)
             self.assertEqual(roundtrip_response.json(), saved)
+
+            update_without_password = self.client.put(
+                "/admin-api/actor-settings",
+                json={
+                    "redis_url": "redis://runtime.example.com:6379/9",
+                    "actor_pipeline_enabled": False,
+                    "actor_debounce_ms": 50,
+                    "actor_max_messages_per_turn": 2,
+                    "actor_first_reply_delay_ms": 150,
+                    "actor_chunk_delay_ms": 90,
+                    "actor_reply_chunk_min": 1,
+                    "actor_reply_chunk_max": 2,
+                    "actor_retry_max_attempts": 1,
+                    "actor_retry_backoff_base_ms": 120,
+                },
+            )
+            self.assertEqual(update_without_password.status_code, 200)
+            self.assertTrue(update_without_password.json()["has_redis_password"])
+            self.assertNotIn("redis_password", update_without_password.json())
+            self.assertEqual(
+                runtime_config_service.get_effective_actor_config()["redis_password"],
+                "runtime-secret",
+            )
+
+            update_with_null_password = self.client.put(
+                "/admin-api/actor-settings",
+                json={
+                    "redis_url": "redis://runtime.example.com:6379/9",
+                    "redis_password": None,
+                    "actor_pipeline_enabled": False,
+                    "actor_debounce_ms": 50,
+                    "actor_max_messages_per_turn": 2,
+                    "actor_first_reply_delay_ms": 150,
+                    "actor_chunk_delay_ms": 90,
+                    "actor_reply_chunk_min": 1,
+                    "actor_reply_chunk_max": 2,
+                    "actor_retry_max_attempts": 1,
+                    "actor_retry_backoff_base_ms": 120,
+                },
+            )
+            self.assertEqual(update_with_null_password.status_code, 200)
+            self.assertTrue(update_with_null_password.json()["has_redis_password"])
+            self.assertEqual(
+                runtime_config_service.get_effective_actor_config()["redis_password"],
+                "runtime-secret",
+            )
 
 
 class PromptCompositionTests(unittest.TestCase):

@@ -579,6 +579,22 @@ class RuntimeConfigService:
             "actor_retry_backoff_base_ms": actor_retry_backoff_base_ms,
         }
 
+    def get_actor_settings_payload(self) -> Dict:
+        actor = self.get_effective_actor_config()
+        return {
+            "redis_url": actor["redis_url"],
+            "has_redis_password": bool(actor["redis_password"]),
+            "actor_pipeline_enabled": actor["actor_pipeline_enabled"],
+            "actor_debounce_ms": actor["actor_debounce_ms"],
+            "actor_max_messages_per_turn": actor["actor_max_messages_per_turn"],
+            "actor_first_reply_delay_ms": actor["actor_first_reply_delay_ms"],
+            "actor_chunk_delay_ms": actor["actor_chunk_delay_ms"],
+            "actor_reply_chunk_min": actor["actor_reply_chunk_min"],
+            "actor_reply_chunk_max": actor["actor_reply_chunk_max"],
+            "actor_retry_max_attempts": actor["actor_retry_max_attempts"],
+            "actor_retry_backoff_base_ms": actor["actor_retry_backoff_base_ms"],
+        }
+
     def get_callback_url(self) -> str:
         public_base_url = self.get_effective_public_base_url()
         if public_base_url:

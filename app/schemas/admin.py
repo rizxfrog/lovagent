@@ -84,7 +84,21 @@ class ProactiveChatActionRequest(BaseModel):
 
 class ActorSettingsPayload(BaseModel):
     redis_url: str = ""
-    redis_password: str = ""
+    redis_password: Optional[str] = None
+    actor_pipeline_enabled: bool = False
+    actor_debounce_ms: int = 2400
+    actor_max_messages_per_turn: int = 10
+    actor_first_reply_delay_ms: int = 300
+    actor_chunk_delay_ms: int = 200
+    actor_reply_chunk_min: int = 1
+    actor_reply_chunk_max: int = 5
+    actor_retry_max_attempts: int = 3
+    actor_retry_backoff_base_ms: int = 300
+
+
+class ActorSettingsResponse(BaseModel):
+    redis_url: str = ""
+    has_redis_password: bool = False
     actor_pipeline_enabled: bool = False
     actor_debounce_ms: int = 2400
     actor_max_messages_per_turn: int = 10

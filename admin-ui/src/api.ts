@@ -3,6 +3,7 @@ import { normalizePersonaConfig } from "./lib/persona";
 import { normalizeProactiveChatConfig } from "./lib/proactiveChat";
 import type {
   ActorSettingsConfig,
+  ActorSettingsUpdatePayload,
   PersonaConfig,
   PreviewResponse,
   ProactiveChatConfig,
@@ -105,7 +106,7 @@ export const api = {
   getActorSettings(): Promise<ActorSettingsConfig> {
     return request<ActorSettingsConfig>("/admin-api/actor-settings");
   },
-  saveActorSettings(payload: ActorSettingsConfig): Promise<ActorSettingsConfig> {
+  saveActorSettings(payload: ActorSettingsUpdatePayload): Promise<ActorSettingsConfig> {
     return request<ActorSettingsConfig>("/admin-api/actor-settings", {
       method: "PUT",
       body: JSON.stringify(payload),

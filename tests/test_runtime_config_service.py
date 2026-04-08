@@ -310,6 +310,30 @@ class RuntimeConfigServiceTests(unittest.TestCase):
             self.assertEqual(effective_actor["actor_chunk_delay_ms"], 0)
             self.assertEqual(effective_actor["actor_retry_backoff_base_ms"], 0)
 
+    def test_actor_settings_payload_hides_password_and_reports_presence(self):
+        self._clear_runtime_config()
+
+        with (
+            patch.object(settings, "redis_url", "redis://env.example.com:6379/0"),
+            patch.object(settings, "redis_password", ""),
+        ):
+            runtime_config_service.save_section(
+                "channels_actor",
+                {
+                    "redis_url": "redis://runtime.example.com:6379/2",
+                    "redis_password": "runtime-secret",
+                    "actor_pipeline_enabled": True,
+                },
+            )
+
+            effective_actor = runtime_config_service.get_effective_actor_config()
+            public_actor = runtime_config_service.get_actor_settings_payload()
+
+            self.assertEqual(effective_actor["redis_password"], "runtime-secret")
+            self.assertNotIn("redis_password", public_actor)
+            self.assertTrue(public_actor["has_redis_password"])
+            self.assertEqual(public_actor["redis_url"], "redis://runtime.example.com:6379/2")
+
 
 if __name__ == "__main__":
     unittest.main()
