@@ -3,10 +3,11 @@
 """
 
 from collections import defaultdict
+from datetime import date, datetime
 import json
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -27,6 +28,15 @@ class GLMService:
 
     def _current_provider_name(self) -> str:
         return str(self._current_config().get("model_provider") or "glm").strip().lower()
+
+    @staticmethod
+    def _json_default(value: Any) -> str:
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        return str(value)
+
+    def _safe_json_dumps(self, payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False, default=self._json_default)
 
     def _resolve_chat_model(self, config: Dict, task_type: str) -> str:
         provider_name = str(config.get("model_provider") or "glm").strip().lower()
@@ -487,13 +497,13 @@ class GLMService:
 }}
 
 已有长期记忆：
-{json.dumps(existing_memory, ensure_ascii=False)}
+{self._safe_json_dumps(existing_memory)}
 
 已有短期记忆：
-{json.dumps(short_term_memory, ensure_ascii=False)}
+{self._safe_json_dumps(short_term_memory)}
 
 最近几轮消息：
-{json.dumps(recent_context[-6:], ensure_ascii=False)}
+{self._safe_json_dumps(recent_context[-6:])}
 
 当前用户消息：
 {user_message}

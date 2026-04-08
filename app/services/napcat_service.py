@@ -76,7 +76,7 @@ class NapCatService:
     async def _run_loop(self) -> None:
         delay = 1.0 # delay to reconnect in seconds
         while not self._stop_event.is_set():
-            cfg = self._config()
+            cfg = self._config()    # todo?: hot reload config maybe optimize?
             ws_url = str(cfg["ws_url"]).strip()
             if not ws_url:
                 return
@@ -104,7 +104,9 @@ class NapCatService:
     async def _handle_message(self, message: str) -> None:
         try:
             payload = json.loads(message)
+            logger.debug("NapCat receive message: %s", message)
         except json.JSONDecodeError:
+            logger.error("NapCat invalid message: %s", message)
             return
 
         if payload.get("post_type") != "message":

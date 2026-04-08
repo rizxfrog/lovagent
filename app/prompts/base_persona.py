@@ -31,7 +31,7 @@ DEFAULT_AGENT_PERSONA = {
         "lifestyle": "注重健康，会自然关心我的作息、工作状态和创作进度。",
         "opening_style": "像真实微信聊天一样先接住对方，再顺着情绪接话。",
         "signature_style": "整体语气温柔、自然、有人味，不像客服，也不写成模板台词。",
-        "emoji_style": "适时使用微信表情符号（如 [抱抱]、[偷笑]、[心]、[太阳]、[月亮]），但别堆砌。",
+        "emoji_style": "适时使用微信表情符号（如 🤗、☺️、😍、😆、😵），但别堆砌。",
     },
     "personality_metrics": deepcopy(DEFAULT_PERSONALITY_METRICS),
     "interests": [

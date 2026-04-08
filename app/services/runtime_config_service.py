@@ -18,10 +18,13 @@ from app.services.provider_catalog import get_provider_preset, infer_provider_id
 
 RUNTIME_CONFIG_KEY = "setup_runtime_config"
 CONFIG_CACHE_TTL_SECONDS = 2.0
+_ENV_MODEL_PROVIDER = str(settings.model_provider or "glm").strip().lower()
+_DEFAULT_PROVIDER_ID = "openai" if _ENV_MODEL_PROVIDER in {"openai", "openai_compatible"} else "zhipu"
+_DEFAULT_MODEL_PROVIDER = "openai" if _DEFAULT_PROVIDER_ID == "openai" else "glm"
 
 DEFAULT_RUNTIME_CONFIG = {
     "model": {
-        "provider_id": "zhipu",
+        "provider_id": _DEFAULT_PROVIDER_ID,
         "provider_api_key": "",
         "provider_base_url": "",
         "text_model_override": "",
@@ -30,16 +33,16 @@ DEFAULT_RUNTIME_CONFIG = {
         "search_provider_mode": "tavily_primary_exa_fallback",
         "tavily_api_key": "",
         "exa_api_key": "",
-        "model_provider": "glm",
+        "model_provider": _DEFAULT_MODEL_PROVIDER,
         "zhipu_api_key": "",
         "zhipu_model": "glm-5",
         "zhipu_thinking_type": "disabled",
         "multimodal_api_key": "",
         "multimodal_model": "glm-4.6v",
         "openai_api_key": "",
-        "openai_base_url": "",
+        "openai_base_url": settings.openai_base_url,
         "openai_model_mode": "manual",
-        "openai_model": "",
+        "openai_model": settings.openai_model,
         "openai_models": {
             "chat_model": "",
             "memory_model": "",

@@ -29,12 +29,19 @@ from app.services.tunnel_service import (
 BASE_DIR = Path(__file__).resolve().parent.parent
 ADMIN_DIST_DIR = BASE_DIR / "admin-ui" / "dist"
 ADMIN_INDEX_PATH = ADMIN_DIST_DIR / "index.html"
+VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+resolved_log_level_name = str(settings.log_level or "INFO").strip().upper()
+if resolved_log_level_name not in VALID_LOG_LEVELS:
+    resolved_log_level_name = "INFO"
+resolved_log_level = getattr(logging, resolved_log_level_name, logging.INFO)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=resolved_log_level,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+if str(settings.log_level or "").strip().upper() not in VALID_LOG_LEVELS:
+    logger.warning("Invalid LOG_LEVEL=%s, fallback to INFO", settings.log_level)
 
 
 @asynccontextmanager

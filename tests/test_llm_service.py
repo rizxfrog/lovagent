@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import sys
 import types
 import unittest
@@ -194,6 +195,33 @@ class GLMServiceTests(unittest.TestCase):
         parsed = service._parse_memory_extraction_result("not-json")
 
         self.assertEqual(parsed, service._empty_memory_extraction_result())
+
+    def test_extract_memory_facts_handles_datetime_in_existing_memory(self):
+        service = GLMService()
+        llm_json = """
+        {
+          "identity_facts": [],
+          "preferences": [],
+          "worries": [],
+          "milestones": [],
+          "taboos": [],
+          "followups": [],
+          "short_term_summary": "",
+          "emotion_trend": "平稳",
+          "user_joys": []
+        }
+        """
+
+        with patch.object(service, "chat_completion", AsyncMock(return_value=llm_json)):
+            result = asyncio.run(
+                service.extract_memory_facts(
+                    user_message="hello",
+                    agent_message="hi",
+                    existing_memory={"last_seen_at": datetime(2026, 4, 9, 1, 32, 18)},
+                )
+            )
+
+        self.assertIn("identity_facts", result)
 
     def test_chat_completion_uses_manual_openai_compatible_model(self):
         service = GLMService()

@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     # 服务配置
     server_host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     server_port: int = int(os.getenv("SERVER_PORT", "8000"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
     public_base_url: str = os.getenv("PUBLIC_BASE_URL", "")
     proactive_scheduler_interval_seconds: int = int(os.getenv("PROACTIVE_SCHEDULER_INTERVAL_SECONDS", "60"))
     admin_dev_origins_raw: str = os.getenv(
