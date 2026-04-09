@@ -457,6 +457,9 @@ class GLMService:
         target = max(chunk_min, min(chunk_max, estimated))
         if len(fragments) >= chunk_min:
             target = min(target, len(fragments))
+        # Keep multi-sentence replies as multiple chat bubbles when allowed.
+        if len(text.strip()) >= 12 and len(fragments) > 1 and chunk_max > 1:
+            target = max(target, min(len(fragments), chunk_max, 2))
         return max(chunk_min, min(chunk_max, target))
 
     def _expand_longest_fragment_once(self, fragments: List[str]) -> List[str]:

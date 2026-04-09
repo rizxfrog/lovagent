@@ -460,5 +460,18 @@ class GLMServiceTests(unittest.TestCase):
         self.assertEqual(chunks, ["\u7b2c\u4e00\u53e5\u3002", "\u7b2c\u4e8c\u53e5\uff01", "\u7b2c\u4e09\u53e5\uff1f"])
         self.assertEqual("".join(chunks), original)
 
+    def test_plan_reply_chunks_keeps_multiple_bubbles_when_text_has_multi_sentence_fragments(self):
+        service = GLMService()
+        original = "\u597d\u5440\uff01\u6b63\u597d\u6211\u4e5f\u997f\u4e86\uff0c\u60f3\u5403\u4ec0\u4e48\uff1f\u706b\u9505\u8fd8\u662f\u6e05\u6de1\u70b9\u7684\uff1f"
+
+        chunks = service.plan_reply_chunks(
+            original,
+            chunk_min=1,
+            chunk_max=5,
+        )
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertEqual("".join(chunks), original)
+
 if __name__ == "__main__":
     unittest.main()

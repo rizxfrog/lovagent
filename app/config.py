@@ -1,10 +1,12 @@
-"""
+﻿"""
 配置管理模块
 """
 
 import os
 from hashlib import sha256
+
 from dotenv import load_dotenv
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings
 
 # 加载环境变量
@@ -30,7 +32,7 @@ class Settings(BaseSettings):
     zhipu_multimodal_api_key: str = os.getenv("ZHIPU_MULTIMODAL_API_KEY", "")
     zhipu_multimodal_model: str = os.getenv("ZHIPU_MULTIMODAL_MODEL", "glm-4.6v")
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    zhipu_web_search_enabled: bool = os.getenv("ZHIPU_WEB_SEARCH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    zhipu_web_search_enabled: bool = True
     zhipu_web_search_engine: str = os.getenv("ZHIPU_WEB_SEARCH_ENGINE", "search_std")
     zhipu_web_search_count: int = int(os.getenv("ZHIPU_WEB_SEARCH_COUNT", "4"))
     zhipu_web_search_content_size: str = os.getenv("ZHIPU_WEB_SEARCH_CONTENT_SIZE", "medium")
@@ -61,7 +63,7 @@ class Settings(BaseSettings):
     redis_url: str = os.getenv("REDIS_URL", "")
     redis_password: str = os.getenv("REDIS_PASSWORD", "")
     proactive_scheduler_interval_seconds: int = int(os.getenv("PROACTIVE_SCHEDULER_INTERVAL_SECONDS", "60"))
-    actor_pipeline_enabled: bool = os.getenv("ACTOR_PIPELINE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    actor_pipeline_enabled: bool = bool(os.getenv("ACTOR_PIPELINE_ENABLED", False))
     actor_debounce_ms: int = int(os.getenv("ACTOR_DEBOUNCE_MS", "2400"))
     actor_max_messages_per_turn: int = int(os.getenv("ACTOR_MAX_MESSAGES_PER_TURN", "10"))
     actor_first_reply_delay_ms: int = int(os.getenv("ACTOR_FIRST_REPLY_DELAY_MS", "300"))
@@ -81,6 +83,28 @@ class Settings(BaseSettings):
     # 记忆配置
     max_short_term_messages: int = 20  # 短期记忆保留的最大消息数
     max_context_length: int = 4000  # 最大上下文长度（字符）
+
+    @field_validator("zhipu_web_search_enabled", "actor_pipeline_enabled", mode="before")
+    @classmethod
+    def _parse_bool_env(cls, value: object, info: ValidationInfo) -> object:
+        defaults = {
+            "zhipu_web_search_enabled": True,
+            "actor_pipeline_enabled": False,
+        }
+
+        if value is None:
+            return defaults[info.field_name]
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "":
+                return defaults[info.field_name]
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return value
 
     @property
     def database_url(self) -> str:
