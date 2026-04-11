@@ -112,6 +112,7 @@ class NapCatService:
             logger.error("NapCat invalid message: %s", message)
             return
 
+        # ignore non-message events or group messages
         if payload.get("post_type") != "message":
             return
         if payload.get("message_type") != "private":

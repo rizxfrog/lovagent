@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # 数据库配置
     database_type: str = os.getenv("DATABASE_TYPE", "sqlite")
     database_path: str = os.getenv("DATABASE_PATH", "./girlchat.db")
+    postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
+    postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    postgres_user: str = os.getenv("POSTGRES_USER", "postgres")
+    postgres_password: str = os.getenv("POSTGRES_PASSWORD", "")
+    postgres_db: str = os.getenv("POSTGRES_DB", "postgres")
 
     # MySQL 配置 (保留用于生产环境)
     mysql_host: str = os.getenv("MYSQL_HOST", "localhost")
@@ -109,10 +114,15 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """生成数据库连接 URL"""
-        if self.database_type == "sqlite":
+        database_type = self.database_type.strip().lower()
+        if database_type == "sqlite":
             return f"sqlite:///{self.database_path}"
-        else:
-            return f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
+        if database_type == "postgres":
+            return (
+                f"postgresql://{self.postgres_user}:{self.postgres_password}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            )
+        return f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
 
     @property
     def mysql_url(self) -> str:

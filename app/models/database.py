@@ -38,9 +38,49 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     """初始化数据库，创建所有表"""
+    inspector = inspect(engine)
+    users_table_conflict = _describe_incompatible_users_table(inspector)
+    if users_table_conflict:
+        raise RuntimeError(
+            "Detected incompatible existing 'users' table in the configured database. "
+            f"{users_table_conflict}. Use a dedicated POSTGRES_DB for lovagent or rename/migrate the legacy table first."
+        )
     Base.metadata.create_all(bind=engine)
     _run_compat_migrations()
     logger.info("数据库表创建完成")
+
+
+def check_database_connection() -> tuple[bool, str | None]:
+    """检查数据库连接是否可用。"""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _describe_incompatible_users_table(inspector) -> str | None:
+    tables = inspector.get_table_names()
+    if "users" not in tables:
+        return None
+
+    columns = inspector.get_columns("users")
+    column_names = {str(item["name"]) for item in columns}
+    expected_columns = {"id", "channel", "external_user_id"}
+    if expected_columns.issubset(column_names):
+        id_column = next((item for item in columns if item["name"] == "id"), None)
+        id_type = str(id_column.get("type") or "").lower() if id_column else ""
+        if any(token in id_type for token in {"int", "serial"}):
+            return None
+
+    id_column = next((item for item in columns if item["name"] == "id"), None)
+    id_type = str(id_column.get("type") or "unknown").lower() if id_column else "missing"
+    interesting_columns = sorted(name for name in column_names if name in {"username", "password_hash", "role", "channel", "external_user_id"})
+    detail = f"users.id is {id_type}"
+    if interesting_columns:
+        detail = f"{detail}; columns: {', '.join(interesting_columns)}"
+    return detail
 
 
 def _run_compat_migrations() -> None:

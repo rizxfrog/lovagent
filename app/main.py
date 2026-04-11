@@ -14,7 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from app.config import settings
-from app.models.database import init_db
+from app.models.database import check_database_connection, init_db
 from app.routers import admin, setup, wecom
 from app.services.inbound_actor_service import inbound_actor_service
 from app.services.napcat_service import napcat_service
@@ -51,6 +51,12 @@ if str(settings.log_level or "").strip().upper() not in VALID_LOG_LEVELS:
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     init_db()
+    try:
+        database_ok, database_detail = check_database_connection()
+        if not database_ok:
+            logger.error("Startup database availability check failed: %s", database_detail or "unknown error")
+    except Exception:
+        logger.exception("Startup database availability check crashed")
     tunnel_service.ensure_started()
     tunnel_status = tunnel_service.get_status()
     callback_base_url = tunnel_status["public_url"]
