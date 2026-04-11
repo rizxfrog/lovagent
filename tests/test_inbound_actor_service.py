@@ -348,7 +348,7 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         external_user_id = f"chunk-stale-user-{uuid4().hex[:8]}"
 
         async def generate_reply(turn):
-            return "first sentence. second sentence. third sentence."
+            return '{"chunks":["first sentence.","second sentence.","third sentence."],"tone":"structured","reason":"test payload"}'
 
         async def deliver_reply(turn, reply):
             return await InboundActorService._default_deliver_reply(service, turn, reply)
@@ -861,7 +861,8 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         ):
             reply = await service._default_generate_reply(turn)
 
-        self.assertEqual(reply, "fallback")
+        self.assertIn('"chunks"', reply)
+        self.assertIn('"fallback"', reply)
 
     async def test_generate_multimodal_reply_converts_image_url_to_data_url(self):
         service = InboundActorService()
@@ -913,7 +914,8 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
         ):
             reply = await service._default_generate_reply(turn)
 
-        self.assertEqual(reply, "ok")
+        self.assertIn('"chunks"', reply)
+        self.assertIn('"ok"', reply)
         prepared = gen_mock.await_args.kwargs["prepared_attachments"]
         model_image_url = prepared[0]["content_part"]["image_url"]["url"]
         self.assertTrue(model_image_url.startswith("data:image/jpeg;base64,"))

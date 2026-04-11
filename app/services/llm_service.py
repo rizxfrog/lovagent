@@ -3,6 +3,7 @@
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime
 import json
 import logging
@@ -15,6 +16,13 @@ from app.providers.model_provider import get_chat_provider
 from app.services.runtime_config_service import runtime_config_service
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StructuredReplyEnvelope:
+    chunks: List[str]
+    tone: str
+    reason: str
 
 
 class GLMService:
@@ -37,6 +45,70 @@ class GLMService:
 
     def _safe_json_dumps(self, payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False, default=self._json_default)
+
+    def build_reply_envelope(self, chunks: List[str], *, tone: str, reason: str) -> str:
+        payload = {
+            "chunks": [str(chunk).strip() for chunk in chunks if str(chunk).strip()],
+            "tone": str(tone or "").strip(),
+            "reason": str(reason or "").strip(),
+        }
+        return self._safe_json_dumps(payload)
+
+    def build_reply_envelope_from_text(
+        self,
+        text: str,
+        *,
+        chunk_min: int = 1,
+        chunk_max: int = 5,
+        tone: str,
+        reason: str,
+    ) -> str:
+        chunks = self.plan_reply_chunks(text, chunk_min=chunk_min, chunk_max=chunk_max)
+        if not chunks and str(text or "").strip():
+            chunks = [str(text).strip()]
+        return self.build_reply_envelope(chunks, tone=tone, reason=reason)
+
+    def parse_reply_envelope(
+        self,
+        raw_text: str,
+        *,
+        chunk_min: int = 1,
+        chunk_max: int = 5,
+    ) -> StructuredReplyEnvelope | None:
+        cleaned = str(raw_text or "").strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        tone = str(payload.get("tone") or "").strip()
+        reason = str(payload.get("reason") or "").strip()
+        chunks_raw = payload.get("chunks")
+        if not isinstance(chunks_raw, list):
+            return None
+
+        chunks = [str(chunk).strip() for chunk in chunks_raw if str(chunk).strip()]
+        normalized_min = max(1, int(chunk_min or 1))
+        normalized_max = max(normalized_min, int(chunk_max or normalized_min))
+        if len(chunks) < normalized_min or len(chunks) > normalized_max:
+            return None
+        if not tone or not reason:
+            return None
+
+        return StructuredReplyEnvelope(chunks=chunks, tone=tone, reason=reason)
+
+    def render_reply_envelope_text(self, envelope: StructuredReplyEnvelope, separator: str = "\n") -> str:
+        return separator.join(str(chunk).strip() for chunk in envelope.chunks if str(chunk).strip())
 
     def _resolve_chat_model(self, config: Dict, task_type: str) -> str:
         provider_name = str(config.get("model_provider") or "glm").strip().lower()

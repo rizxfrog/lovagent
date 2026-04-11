@@ -473,5 +473,45 @@ class GLMServiceTests(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2)
         self.assertEqual("".join(chunks), original)
 
+    def test_parse_reply_envelope_accepts_valid_json_payload(self):
+        service = GLMService()
+
+        envelope = service.parse_reply_envelope(
+            """```json
+            {"chunks":["第一条","第二条"],"tone":"温柔","reason":"用户状态低落"}
+            ```""",
+            chunk_min=1,
+            chunk_max=5,
+        )
+
+        self.assertIsNotNone(envelope)
+        self.assertEqual(envelope.chunks, ["第一条", "第二条"])
+        self.assertEqual(envelope.tone, "温柔")
+        self.assertEqual(envelope.reason, "用户状态低落")
+
+    def test_parse_reply_envelope_rejects_invalid_chunk_count(self):
+        service = GLMService()
+
+        envelope = service.parse_reply_envelope(
+            '{"chunks":[],"tone":"温柔","reason":"用户状态低落"}',
+            chunk_min=1,
+            chunk_max=5,
+        )
+
+        self.assertIsNone(envelope)
+
+    def test_build_reply_envelope_uses_chunks_tone_and_reason_fields(self):
+        service = GLMService()
+
+        payload = service.build_reply_envelope(
+            ["第一条", "第二条"],
+            tone="温柔",
+            reason="用户状态低落",
+        )
+
+        self.assertIn('"chunks"', payload)
+        self.assertIn('"tone": "温柔"', payload)
+        self.assertIn('"reason": "用户状态低落"', payload)
+
 if __name__ == "__main__":
     unittest.main()

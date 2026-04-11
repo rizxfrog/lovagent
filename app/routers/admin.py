@@ -169,9 +169,10 @@ async def preview_reply(payload: PreviewRequest, _: bool = Depends(require_admin
         }
     )
 
+    envelope = glm_service.parse_reply_envelope(preview.get("reply", ""))
     return {
         "prompt": preview.get("prompt", ""),
-        "reply": preview.get("reply", ""),
+        "reply": glm_service.render_reply_envelope_text(envelope) if envelope else preview.get("reply", ""),
         "persona_config": preview.get("persona_config"),
         "user_memory": preview.get("user_memory"),
         "graph_trace": preview.get("graph_trace", []),

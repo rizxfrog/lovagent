@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.graph.subgraphs.generation import _chat_with_retry, _preview_finalize_reply
+from app.services.llm_service import glm_service
 
 
 class GenerationSubgraphTests(unittest.TestCase):
@@ -41,7 +42,9 @@ class GenerationSubgraphTests(unittest.TestCase):
         ):
             result = asyncio.run(_preview_finalize_reply(state))
 
-        self.assertEqual(result["reply"], "fallback reply")
+        envelope = glm_service.parse_reply_envelope(result["reply"])
+        self.assertIsNotNone(envelope)
+        self.assertEqual(envelope.chunks, ["fallback reply"])
 
 
 if __name__ == "__main__":

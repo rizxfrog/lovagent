@@ -7,6 +7,8 @@ import re
 from difflib import SequenceMatcher
 from typing import Dict, Iterable, List, Optional
 
+from app.services.runtime_config_service import runtime_config_service
+
 
 def get_current_time() -> str:
     """获取当前时间字符串"""
@@ -85,51 +87,88 @@ def get_response_constraints(text: str, response_preferences: Optional[Dict[str,
     """
     cleaned = sanitize_input(text)
     length = len(cleaned)
-    question_markers = ("?", "？", "吗", "呢", "么", "什么", "怎么", "为什么", "要不要", "是不是")
+    question_markers = (
+        "?",
+        "\uFF1F",
+        "\u5417",
+        "\u5462",
+        "\u4E48",
+        "\u4EC0\u4E48",
+        "\u600E\u4E48",
+        "\u4E3A\u4EC0\u4E48",
+        "\u8981\u4E0D\u8981",
+        "\u662F\u4E0D\u662F",
+    )
     has_question = any(marker in cleaned for marker in question_markers)
     has_line_break = "\n" in cleaned
     preferences = _merge_response_preferences(response_preferences)
+    actor_config = runtime_config_service.get_effective_actor_config()
+    chunk_min = max(1, int(actor_config.get("actor_reply_chunk_min") or 1))
+    chunk_max = max(chunk_min, int(actor_config.get("actor_reply_chunk_max") or chunk_min))
 
     ultra_short_max_chars = preferences["ultra_short_max_chars"]
     short_max_chars = preferences["short_max_chars"]
     medium_max_chars = preferences["medium_max_chars"]
     long_max_chars = preferences["long_max_chars"]
 
+    def build_instruction(length_instruction: str) -> str:
+        return (
+            f"{length_instruction} "
+            f'必须输出 JSON，对象格式固定为 {{"chunks":["第1条","第2条"],"tone":"语气说明","reason":"生成原因"}}。'
+            f"chunks 必须是 {chunk_min}~{chunk_max} 条非空字符串；tone 和 reason 必须是非空字符串；"
+            "不要输出 JSON 之外的任何文字。"
+        )
+
     if length <= 6 and not has_question and not has_line_break:
         return {
             "style": "ultra_short",
-            "instruction": f"这轮只回 1 句短回复，10-{ultra_short_max_chars} 个汉字左右，最多不超过 {ultra_short_max_chars} 个汉字。",
+            "instruction": build_instruction(
+                f"这轮只回 1 句短回复，10-{ultra_short_max_chars} 个汉字左右，最多不超过 {ultra_short_max_chars} 个汉字。"
+            ),
             "max_chars": ultra_short_max_chars,
             "max_tokens": _estimate_max_tokens(ultra_short_max_chars, minimum=48),
             "context_limit": 2,
+            "chunk_min": chunk_min,
+            "chunk_max": chunk_max,
         }
 
     if length <= 18 and not has_line_break:
         return {
             "style": "short",
-            "instruction": f"这轮优先回 1 句，必要时最多 2 句，18-{short_max_chars} 个汉字左右，最多不超过 {short_max_chars} 个汉字。",
+            "instruction": build_instruction(
+                f"这轮优先回 1 句，必要时最多 2 句，18-{short_max_chars} 个汉字左右，最多不超过 {short_max_chars} 个汉字。"
+            ),
             "max_chars": short_max_chars,
             "max_tokens": _estimate_max_tokens(short_max_chars, minimum=80),
             "context_limit": 3,
+            "chunk_min": chunk_min,
+            "chunk_max": chunk_max,
         }
 
     if length <= 60 and not has_line_break:
         return {
             "style": "medium",
-            "instruction": f"这轮回 1-2 句自然微信式回复，30-{medium_max_chars} 个汉字左右，最多不超过 {medium_max_chars} 个汉字。",
+            "instruction": build_instruction(
+                f"这轮回 1-2 句自然微信式回复，30-{medium_max_chars} 个汉字左右，最多不超过 {medium_max_chars} 个汉字。"
+            ),
             "max_chars": medium_max_chars,
             "max_tokens": _estimate_max_tokens(medium_max_chars, minimum=128),
             "context_limit": 4,
+            "chunk_min": chunk_min,
+            "chunk_max": chunk_max,
         }
 
     return {
         "style": "long",
-        "instruction": f"这轮可以回 2-3 句，但仍要克制，60-{long_max_chars} 个汉字左右，最多不超过 {long_max_chars} 个汉字。",
+        "instruction": build_instruction(
+            f"这轮可以回 2-3 句，但仍要克制，60-{long_max_chars} 个汉字左右，最多不超过 {long_max_chars} 个汉字。"
+        ),
         "max_chars": long_max_chars,
         "max_tokens": _estimate_max_tokens(long_max_chars, minimum=192),
         "context_limit": 5,
+        "chunk_min": chunk_min,
+        "chunk_max": chunk_max,
     }
-
 
 def _merge_response_preferences(response_preferences: Optional[Dict[str, int]] = None) -> Dict[str, int]:
     defaults = {

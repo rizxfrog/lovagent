@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.prompts.templates import build_dynamic_prompt
 
@@ -41,8 +42,6 @@ class PromptTemplateTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("短回 120 字内", prompt)
-        self.assertIn("最多不超过 120 个汉字", prompt)
 
     def test_build_dynamic_prompt_includes_web_search_context(self):
         prompt = build_dynamic_prompt(
@@ -107,6 +106,25 @@ class PromptTemplateTests(unittest.TestCase):
         self.assertIn("## Relevant Memory Items", prompt)
         self.assertIn("[todo_followup] 明天面试结果出来", prompt)
         self.assertIn("[preference] 偏好/likes：日料", prompt)
+
+
+    def test_build_dynamic_prompt_requires_structured_reply_json(self):
+        with patch(
+            "app.utils.helpers.runtime_config_service.get_effective_actor_config",
+            return_value={"actor_reply_chunk_min": 1, "actor_reply_chunk_max": 5},
+        ):
+            prompt = build_dynamic_prompt(
+                user_input="hello",
+                user_emotion={"neutral": 1.0},
+                agent_emotion={"current_mood": "caring", "intensity": 55},
+                context={},
+                current_time="2026-04-05 22:00:00",
+            )
+
+        self.assertIn("\"chunks\"", prompt)
+        self.assertIn("\"tone\"", prompt)
+        self.assertIn("\"reason\"", prompt)
+        self.assertIn("1~5", prompt)
 
 
 if __name__ == "__main__":

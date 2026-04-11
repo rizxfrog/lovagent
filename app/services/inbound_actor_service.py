@@ -694,11 +694,18 @@ class InboundActorService:
         user_message = self._merge_user_message(turn.events)
         user_emotion = {"neutral": 1.0}
         agent_emotion = {"current_mood": "caring", "intensity": 0}
+        actor_config = self._current_config()
+        envelope = glm_service.parse_reply_envelope(
+            reply,
+            chunk_min=int(actor_config["actor_reply_chunk_min"]),
+            chunk_max=int(actor_config["actor_reply_chunk_max"]),
+        )
+        persisted_reply = glm_service.render_reply_envelope_text(envelope) if envelope else reply
         conversation_id = await save_conversation(
             channel=turn.channel,
             external_user_id=turn.external_user_id,
             user_message=user_message,
-            agent_message=reply,
+            agent_message=persisted_reply,
             user_emotion=user_emotion,
             agent_emotion=agent_emotion,
         )
@@ -707,7 +714,7 @@ class InboundActorService:
             external_user_id=turn.external_user_id,
             conversation_id=conversation_id,
             user_message=user_message,
-            agent_message=reply,
+            agent_message=persisted_reply,
             user_emotion=user_emotion,
             agent_emotion=agent_emotion,
         )
@@ -770,6 +777,8 @@ class InboundActorService:
         if not prepared_attachments:
             return ""
 
+        chunk_min = int(response_constraints.get("chunk_min") or 1)
+        chunk_max = int(response_constraints.get("chunk_max") or chunk_min)
         reply = ""
         try:
             reply = await attachment_executor_service.generate_reply(
@@ -795,20 +804,43 @@ class InboundActorService:
                 reply = retried_reply or reply
         except Exception as exc:
             logger.warning("Inbound actor multimodal generation failed, fallback to natural reply: %s", exc)
-
-        return reply or choose_natural_fallback_reply(user_message, user_emotion)
+        if reply:
+            return glm_service.build_reply_envelope_from_text(
+                reply,
+                chunk_min=chunk_min,
+                chunk_max=chunk_max,
+                tone="multimodal_direct",
+                reason="multimodal model reply",
+            )
+        return glm_service.build_reply_envelope_from_text(
+            choose_natural_fallback_reply(user_message, user_emotion),
+            chunk_min=chunk_min,
+            chunk_max=chunk_max,
+            tone="fallback_natural",
+            reason="multimodal generation failed",
+        )
 
     async def _default_deliver_reply(self, turn: InboundActorTurn, reply: str) -> object:
         config = self._current_config()
-        chunks = glm_service.plan_reply_chunks(
+        envelope = glm_service.parse_reply_envelope(
             reply,
             chunk_min=int(config["actor_reply_chunk_min"]),
             chunk_max=int(config["actor_reply_chunk_max"]),
         )
+        if envelope is None:
+            logger.debug("Structured reply parse failed: actor=%s", turn.actor_key)
+            return {"status": "failed", "sent_chunks": 0}
+        logger.debug(
+            "Structured reply metadata: actor=%s tone=%s reason=%s chunks=%s",
+            turn.actor_key,
+            envelope.tone,
+            envelope.reason,
+            len(envelope.chunks),
+        )
         return await channel_dispatcher.send_text_chunks(
             turn.channel,
             turn.external_user_id,
-            chunks,
+            envelope.chunks,
             first_delay_ms=int(config["actor_first_reply_delay_ms"]),
             chunk_delay_ms=int(config["actor_chunk_delay_ms"]),
             should_continue=self._build_delivery_guard(turn),

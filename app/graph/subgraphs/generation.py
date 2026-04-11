@@ -145,11 +145,19 @@ async def _incoming_retry_similar(state: IncomingGraphState) -> IncomingGraphSta
 
 
 async def _incoming_finalize_reply(state: IncomingGraphState) -> IncomingGraphState:
-    return {
-        "agent_response": state["agent_response"] or choose_natural_fallback_reply(
+    response_constraints = state.get("response_constraints") or {}
+    fallback_reply = glm_service.build_reply_envelope_from_text(
+        choose_natural_fallback_reply(
             state["user_content"],
             state["user_emotion"],
         ),
+        chunk_min=int(response_constraints.get("chunk_min") or 1),
+        chunk_max=int(response_constraints.get("chunk_max") or 1),
+        tone="fallback_natural",
+        reason="incoming generation returned empty reply",
+    )
+    return {
+        "agent_response": state["agent_response"] or fallback_reply,
         "graph_trace": append_graph_trace(state, "generation.incoming.finalize_reply"),
     }
 
@@ -206,8 +214,16 @@ async def _preview_finalize_reply(state: PreviewGraphState) -> PreviewGraphState
             "graph_trace": append_graph_trace(state, "generation.preview.finalize_reply"),
         }
 
+    response_constraints = state.get("response_constraints") or {}
+    fallback_reply = glm_service.build_reply_envelope_from_text(
+        choose_natural_fallback_reply(state["user_message"], state["user_emotion"]),
+        chunk_min=int(response_constraints.get("chunk_min") or 1),
+        chunk_max=int(response_constraints.get("chunk_max") or 1),
+        tone="fallback_natural",
+        reason="preview generation returned empty reply",
+    )
     return {
-        "reply": state["reply"] or choose_natural_fallback_reply(state["user_message"], state["user_emotion"]),
+        "reply": state["reply"] or fallback_reply,
         "graph_trace": append_graph_trace(state, "generation.preview.finalize_reply"),
     }
 
@@ -250,13 +266,21 @@ async def _proactive_generate_reply(state: ProactiveChatGraphState) -> Proactive
 
 
 async def _proactive_finalize_reply(state: ProactiveChatGraphState) -> ProactiveChatGraphState:
-    return {
-        "reply": state["reply"] or proactive_chat_service._build_fallback_message(
+    response_constraints = state.get("response_constraints") or {}
+    fallback_reply = glm_service.build_reply_envelope_from_text(
+        proactive_chat_service._build_fallback_message(
             state["target_channel"],
             state["target_external_user_id"],
             state["trigger_type"],
             state["user_memory"],
         ),
+        chunk_min=int(response_constraints.get("chunk_min") or 1),
+        chunk_max=int(response_constraints.get("chunk_max") or 1),
+        tone="fallback_proactive",
+        reason="proactive generation returned empty reply",
+    )
+    return {
+        "reply": state["reply"] or fallback_reply,
         "graph_trace": append_graph_trace(state, "generation.proactive.finalize_reply"),
     }
 

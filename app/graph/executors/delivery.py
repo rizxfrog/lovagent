@@ -12,14 +12,30 @@ from app.models.admin import ProactiveChatLog
 from app.models.database import SessionLocal
 from app.models.user import Conversation, User
 from app.services.channel_dispatcher import channel_dispatcher
+from app.services.llm_service import glm_service
+from app.services.runtime_config_service import runtime_config_service
 
 logger = logging.getLogger(__name__)
 
 
 async def deliver_incoming_reply(*, channel: str, external_user_id: str, content: str) -> Dict[str, object]:
+    actor_config = runtime_config_service.get_effective_actor_config()
+    envelope = glm_service.parse_reply_envelope(
+        content,
+        chunk_min=int(actor_config["actor_reply_chunk_min"]),
+        chunk_max=int(actor_config["actor_reply_chunk_max"]),
+    )
+    if envelope is None:
+        return {"attempted": True, "status": "failed", "error_message": "structured_reply_parse_failed"}
+    logger.debug(
+        "Structured incoming reply metadata: tone=%s reason=%s chunks=%s",
+        envelope.tone,
+        envelope.reason,
+        len(envelope.chunks),
+    )
     delivery_result: Dict[str, object] = {"attempted": True, "status": "sent"}
     try:
-        await channel_dispatcher.send_text(channel, external_user_id, content)
+        await channel_dispatcher.send_text_chunks(channel, external_user_id, envelope.chunks)
     except Exception as exc:
         logger.warning("Send message failed: %s", exc)
         delivery_result = {"attempted": True, "status": "failed", "error_message": str(exc)}
@@ -34,17 +50,37 @@ async def deliver_proactive_outreach(
     window_key: Optional[str],
     content: str,
 ) -> Dict[str, object]:
+    actor_config = runtime_config_service.get_effective_actor_config()
+    envelope = glm_service.parse_reply_envelope(
+        content,
+        chunk_min=int(actor_config["actor_reply_chunk_min"]),
+        chunk_max=int(actor_config["actor_reply_chunk_max"]),
+    )
+    if envelope is None:
+        return {
+            "attempted": True,
+            "status": "failed",
+            "error_message": "structured_reply_parse_failed",
+            "sent_at": datetime.now().isoformat(),
+        }
+    logger.debug(
+        "Structured proactive reply metadata: tone=%s reason=%s chunks=%s",
+        envelope.tone,
+        envelope.reason,
+        len(envelope.chunks),
+    )
+    rendered_content = glm_service.render_reply_envelope_text(envelope)
     sent_at = datetime.now()
     status = "failed"
     error_message = None
 
     try:
-        await channel_dispatcher.send_text(target_channel, target_external_user_id, content)
+        await channel_dispatcher.send_text_chunks(target_channel, target_external_user_id, envelope.chunks)
         status = "sent"
         _save_proactive_conversation(
             target_channel=target_channel,
             target_external_user_id=target_external_user_id,
-            content=content,
+            content=rendered_content,
             sent_at=sent_at,
         )
     except Exception as exc:
@@ -56,7 +92,7 @@ async def deliver_proactive_outreach(
             target_external_user_id=target_external_user_id,
             trigger_type=trigger_type,
             window_key=window_key,
-            content=content,
+            content=rendered_content,
             status=status,
             error_message=error_message,
             sent_at=sent_at,

@@ -13,6 +13,7 @@ from app.config import settings
 from app.models.admin import ProactiveChatConfig, ProactiveChatLog
 from app.models.database import SessionLocal
 from app.models.user import User
+from app.services.llm_service import glm_service
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ class ProactiveChatService:
         return normalized
 
     def _format_graph_payload(self, payload: Dict) -> Dict:
+        envelope = glm_service.parse_reply_envelope(payload.get("reply", ""))
         return {
             "target_channel": payload["target_channel"],
             "target_external_user_id": payload["target_external_user_id"],
@@ -187,7 +189,7 @@ class ProactiveChatService:
             "trigger_type": payload["trigger_type"],
             "window_key": payload.get("window_key"),
             "prompt": payload.get("prompt", ""),
-            "reply": payload.get("reply", ""),
+            "reply": glm_service.render_reply_envelope_text(envelope) if envelope else payload.get("reply", ""),
             "persona_config": payload.get("persona_config"),
             "user_memory": payload.get("user_memory"),
             "config": payload.get("proactive_config", self.get_config()),
