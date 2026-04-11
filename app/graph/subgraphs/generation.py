@@ -71,7 +71,7 @@ async def _chat_with_retry(
                 max_tokens=max_tokens,
             )
         except Exception as retry_exc:
-            logger.warning("图执行轻量重试失败: %s", retry_exc)
+            logger.error("图执行轻量重试仍失败，返回空回复交由兜底逻辑处理: %s", retry_exc)
             return ""
 
 

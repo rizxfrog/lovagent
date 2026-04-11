@@ -1,29 +1,38 @@
-"""
+﻿"""
 Interruptible inbound actor core built on top of Redis streams.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import hashlib
 import logging
+import mimetypes
 import os
 import socket
 from typing import Awaitable, Callable, Dict, Literal, Optional, Sequence
 from uuid import uuid4
 
+import httpx
 from sqlalchemy.exc import IntegrityError
 
 from app.graph import run_preview_graph
 from app.graph.executors import save_conversation, schedule_memory_processing
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal
+from app.prompts.templates import build_dynamic_prompt
+from app.services.attachment_executor_service import attachment_executor_service
 from app.services.channel_dispatcher import channel_dispatcher
+from app.services.emotion_engine import emotion_engine
 from app.services.llm_service import glm_service
+from app.services.memory_service import memory_service
+from app.services.persona_service import persona_service
 from app.services.redis_stream_bus import DlqActorEvent, InboundActorEvent, RedisStreamBus, StreamEnvelope
 from app.services.runtime_config_service import runtime_config_service
+from app.utils.helpers import choose_natural_fallback_reply, get_current_time, get_response_constraints, is_response_too_similar
 
 
 logger = logging.getLogger(__name__)
@@ -705,6 +714,9 @@ class InboundActorService:
 
     async def _default_generate_reply(self, turn: InboundActorTurn) -> str:
         user_message = self._merge_user_message(turn.events)
+        image_urls = self._collect_image_urls(turn.events)
+        if image_urls:
+            return await self._generate_multimodal_reply(turn, user_message, image_urls)
         preview = await run_preview_graph(
             {
                 "preview_mode": "reply",
@@ -714,6 +726,77 @@ class InboundActorService:
             }
         )
         return str(preview.get("reply") or "").strip()
+
+    async def _generate_multimodal_reply(self, turn: InboundActorTurn, user_message: str, image_urls: list[str]) -> str:
+        await memory_service.get_or_create_user(turn.channel, turn.external_user_id)
+        persona_config = persona_service.get_persona_config()
+        response_constraints = get_response_constraints(user_message, persona_config.get("response_preferences"))
+        context = await memory_service.get_conversation_context(turn.channel, turn.external_user_id)
+        user_memory = await memory_service.get_user_memory(turn.channel, turn.external_user_id, query_text=user_message)
+        recent_agent_replies = await memory_service.get_recent_agent_replies(turn.channel, turn.external_user_id, limit=3)
+        context_messages = await memory_service.get_recent_messages(
+            turn.channel,
+            turn.external_user_id,
+            limit=int(response_constraints["context_limit"]),
+        )
+
+        try:
+            user_emotion = await glm_service.analyze_emotion(user_message)
+        except Exception:
+            user_emotion = {"neutral": 1.0}
+
+        agent_emotion = await emotion_engine.update_state(
+            memory_service.build_user_key(turn.channel, turn.external_user_id),
+            user_message,
+            user_emotion,
+        )
+        system_prompt = build_dynamic_prompt(
+            user_input=user_message,
+            user_emotion=user_emotion,
+            agent_emotion=agent_emotion,
+            context=context,
+            current_time=get_current_time(),
+            recent_agent_replies=recent_agent_replies,
+            persona_config=persona_config,
+            user_profile=user_memory,
+            web_search_context={"enabled": False, "triggered": False, "query": "", "results": []},
+        )
+        prepared_attachments = []
+        for image_url in image_urls:
+            resolved_url = await self._resolve_image_reference(image_url)
+            if not resolved_url:
+                continue
+            prepared_attachments.append({"kind": "image", "content_part": {"type": "image_url", "image_url": {"url": resolved_url}}})
+        if not prepared_attachments:
+            return ""
+
+        reply = ""
+        try:
+            reply = await attachment_executor_service.generate_reply(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                prepared_attachments=prepared_attachments,
+                context_messages=context_messages,
+                temperature=0.88,
+                top_p=0.93,
+                max_tokens=int(response_constraints["max_tokens"]),
+            )
+            if reply and is_response_too_similar(reply, recent_agent_replies):
+                retry_prompt = f"{system_prompt}\n\n# Retry Rule\n- 这次换一个角度表达，不要复用最近几轮的句式。\n"
+                retried_reply = await attachment_executor_service.generate_reply(
+                    system_prompt=retry_prompt,
+                    user_message=user_message,
+                    prepared_attachments=prepared_attachments,
+                    context_messages=context_messages,
+                    temperature=0.92,
+                    top_p=0.95,
+                    max_tokens=int(response_constraints["max_tokens"]),
+                )
+                reply = retried_reply or reply
+        except Exception as exc:
+            logger.warning("Inbound actor multimodal generation failed, fallback to natural reply: %s", exc)
+
+        return reply or choose_natural_fallback_reply(user_message, user_emotion)
 
     async def _default_deliver_reply(self, turn: InboundActorTurn, reply: str) -> object:
         config = self._current_config()
@@ -747,8 +830,55 @@ class InboundActorService:
             text = str(event.payload.get("text") or event.payload.get("content") or "").strip()
             if text:
                 parts.append(text)
+                continue
+            image_urls = event.payload.get("image_urls")
+            if isinstance(image_urls, list) and image_urls:
+                parts.append("[图片] 用户发来了一张图片")
         return "\n".join(parts) if parts else "收到一条新消息"
 
+    @staticmethod
+    def _collect_image_urls(events: Sequence[InboundActorEvent]) -> list[str]:
+        urls: list[str] = []
+        for event in events:
+            image_urls = event.payload.get("image_urls")
+            if not isinstance(image_urls, list):
+                continue
+            for image_url in image_urls:
+                cleaned = str(image_url or "").strip()
+                if cleaned and cleaned not in urls:
+                    urls.append(cleaned)
+        return urls
+
+    async def _resolve_image_reference(self, image_ref: str) -> str:
+        cleaned = str(image_ref or "").strip()
+        if not cleaned:
+            return ""
+
+        if cleaned.startswith("data:image/"):
+            return cleaned
+
+        if cleaned.startswith("base64://"):
+            base64_payload = cleaned[len("base64://") :].strip()
+            if not base64_payload:
+                return ""
+            return f"data:image/jpeg;base64,{base64_payload}"
+
+        if cleaned.startswith("http://") or cleaned.startswith("https://"):
+            try:
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, trust_env=False) as client:
+                    response = await client.get(cleaned)
+                    response.raise_for_status()
+                mime = str(response.headers.get("Content-Type") or "").split(";")[0].strip()
+                if not mime:
+                    guessed = mimetypes.guess_type(cleaned)[0]
+                    mime = guessed or "image/jpeg"
+                encoded = base64.b64encode(response.content).decode("utf-8")
+                return f"data:{mime};base64,{encoded}"
+            except Exception as exc:
+                logger.warning("NapCat image download failed, fallback to original URL: %s", exc)
+                return cleaned
+
+        return cleaned
 
 inbound_actor_service = InboundActorService()
 

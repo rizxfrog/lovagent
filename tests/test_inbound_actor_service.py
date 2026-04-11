@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from app.models.actor import ActorInflightState, InboundEventDedup
 from app.models.database import SessionLocal, init_db
-from app.services.inbound_actor_service import InboundActorEvent, InboundActorService
+from app.services.inbound_actor_service import InboundActorEvent, InboundActorService, InboundActorTurn
 from app.services.redis_stream_bus import DlqActorEvent, RedisStreamBus, StreamEnvelope
 
 
@@ -797,6 +797,126 @@ class InboundActorServiceTests(unittest.IsolatedAsyncioTestCase):
             .count()
         )
         self.assertEqual(db_count, 1)
+
+    async def test_default_generate_reply_routes_to_multimodal_when_event_has_image_urls(self):
+        service = InboundActorService()
+        turn = InboundActorTurn(
+            channel="napcat",
+            external_user_id=f"img-user-{uuid4().hex[:8]}",
+            actor_key="napcat:img-user",
+            generation_version=0,
+            events=(
+                InboundActorEvent(
+                    event_id="evt-img",
+                    channel="napcat",
+                    external_user_id="img-user",
+                    payload={"text": "[图片] 用户发来了一张图片", "image_urls": ["https://example.com/a.jpg"]},
+                ),
+            ),
+        )
+
+        with (
+            patch.object(service, "_generate_multimodal_reply", AsyncMock(return_value="seen-image")) as multimodal_mock,
+            patch("app.services.inbound_actor_service.run_preview_graph", AsyncMock(return_value={"reply": "fallback"})) as preview_mock,
+        ):
+            reply = await service._default_generate_reply(turn)
+
+        self.assertEqual(reply, "seen-image")
+        multimodal_mock.assert_awaited_once()
+        preview_mock.assert_not_awaited()
+
+    async def test_generate_multimodal_reply_falls_back_when_provider_raises(self):
+        service = InboundActorService()
+        turn = InboundActorTurn(
+            channel="napcat",
+            external_user_id=f"img-user-{uuid4().hex[:8]}",
+            actor_key="napcat:img-user",
+            generation_version=0,
+            events=(
+                InboundActorEvent(
+                    event_id="evt-img",
+                    channel="napcat",
+                    external_user_id="img-user",
+                    payload={"text": "[图片] 用户发来了一张图片", "image_urls": ["https://example.com/a.jpg"]},
+                ),
+            ),
+        )
+
+        with (
+            patch("app.services.inbound_actor_service.memory_service.get_or_create_user", AsyncMock()),
+            patch("app.services.inbound_actor_service.persona_service.get_persona_config", return_value={"response_preferences": {}}),
+            patch("app.services.inbound_actor_service.get_response_constraints", return_value={"context_limit": 2, "max_tokens": 128}),
+            patch("app.services.inbound_actor_service.memory_service.get_conversation_context", AsyncMock(return_value={})),
+            patch("app.services.inbound_actor_service.memory_service.get_user_memory", AsyncMock(return_value={})),
+            patch("app.services.inbound_actor_service.memory_service.get_recent_agent_replies", AsyncMock(return_value=[])),
+            patch("app.services.inbound_actor_service.memory_service.get_recent_messages", AsyncMock(return_value=[])),
+            patch("app.services.inbound_actor_service.glm_service.analyze_emotion", AsyncMock(return_value={"neutral": 1.0})),
+            patch("app.services.inbound_actor_service.emotion_engine.update_state", AsyncMock(return_value={"current_mood": "caring", "intensity": 10})),
+            patch("app.services.inbound_actor_service.build_dynamic_prompt", return_value="prompt"),
+            patch(
+                "app.services.inbound_actor_service.attachment_executor_service.generate_reply",
+                AsyncMock(side_effect=RuntimeError("upstream 503")),
+            ),
+            patch("app.services.inbound_actor_service.choose_natural_fallback_reply", return_value="fallback"),
+        ):
+            reply = await service._default_generate_reply(turn)
+
+        self.assertEqual(reply, "fallback")
+
+    async def test_generate_multimodal_reply_converts_image_url_to_data_url(self):
+        service = InboundActorService()
+        turn = InboundActorTurn(
+            channel="napcat",
+            external_user_id=f"img-user-{uuid4().hex[:8]}",
+            actor_key="napcat:img-user",
+            generation_version=0,
+            events=(
+                InboundActorEvent(
+                    event_id="evt-img",
+                    channel="napcat",
+                    external_user_id="img-user",
+                    payload={"text": "[图片] 用户发来了一张图片", "image_urls": ["https://example.com/a.jpg"]},
+                ),
+            ),
+        )
+
+        class _Resp:
+            headers = {"Content-Type": "image/jpeg"}
+            content = b"img-bytes"
+
+            def raise_for_status(self):
+                return None
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url):
+                return _Resp()
+
+        with (
+            patch("app.services.inbound_actor_service.memory_service.get_or_create_user", AsyncMock()),
+            patch("app.services.inbound_actor_service.persona_service.get_persona_config", return_value={"response_preferences": {}}),
+            patch("app.services.inbound_actor_service.get_response_constraints", return_value={"context_limit": 2, "max_tokens": 128}),
+            patch("app.services.inbound_actor_service.memory_service.get_conversation_context", AsyncMock(return_value={})),
+            patch("app.services.inbound_actor_service.memory_service.get_user_memory", AsyncMock(return_value={})),
+            patch("app.services.inbound_actor_service.memory_service.get_recent_agent_replies", AsyncMock(return_value=[])),
+            patch("app.services.inbound_actor_service.memory_service.get_recent_messages", AsyncMock(return_value=[])),
+            patch("app.services.inbound_actor_service.glm_service.analyze_emotion", AsyncMock(return_value={"neutral": 1.0})),
+            patch("app.services.inbound_actor_service.emotion_engine.update_state", AsyncMock(return_value={"current_mood": "caring", "intensity": 10})),
+            patch("app.services.inbound_actor_service.build_dynamic_prompt", return_value="prompt"),
+            patch("app.services.inbound_actor_service.httpx.AsyncClient", return_value=_Client()),
+            patch("app.services.inbound_actor_service.attachment_executor_service.generate_reply", AsyncMock(return_value="ok")) as gen_mock,
+        ):
+            reply = await service._default_generate_reply(turn)
+
+        self.assertEqual(reply, "ok")
+        prepared = gen_mock.await_args.kwargs["prepared_attachments"]
+        model_image_url = prepared[0]["content_part"]["image_url"]["url"]
+        self.assertTrue(model_image_url.startswith("data:image/jpeg;base64,"))
 
     def test_stream_envelope_parser_tolerates_malformed_attempt(self):
         event = RedisStreamBus._deserialize_event(

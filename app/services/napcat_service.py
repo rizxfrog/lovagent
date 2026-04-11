@@ -5,10 +5,12 @@ NapCat OneBot11 forward WebSocket client service.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import random
-from typing import Optional
+import re
+from typing import List, Optional, Tuple
 
 from app.config import settings
 from app.services.redis_stream_bus import InboundActorEvent
@@ -115,9 +117,9 @@ class NapCatService:
         if payload.get("message_type") != "private":
             return
 
-        content = str(payload.get("raw_message") or "").strip()
+        content, image_urls = self._extract_inbound_content(payload)
         external_user_id = str(payload.get("user_id") or "").strip()
-        if not content or not external_user_id:
+        if (not content and not image_urls) or not external_user_id:
             return
 
         actor_config = runtime_config_service.get_effective_actor_config()
@@ -125,7 +127,9 @@ class NapCatService:
             from app.services.inbound_actor_service import inbound_actor_service
 
             try:
-                await inbound_actor_service.publish_inbound_event(self._build_actor_event(payload, external_user_id, content))
+                await inbound_actor_service.publish_inbound_event(
+                    self._build_actor_event(payload, external_user_id, content, image_urls)
+                )
                 return
             except Exception:
                 logger.exception("NapCat actor publish failed; falling back to legacy graph path")
@@ -136,24 +140,67 @@ class NapCatService:
             {
                 "channel": "napcat",
                 "external_user_id": external_user_id,
-                "user_content": content,
+                "user_content": content or "[图片] 用户发来了一张图片",
             }
         )
 
     @staticmethod
-    def _build_actor_event(payload: dict, external_user_id: str, content: str) -> InboundActorEvent:
+    def _build_actor_event(payload: dict, external_user_id: str, content: str, image_urls: List[str]) -> InboundActorEvent:
         event_id = str(payload.get("message_id") or payload.get("message_seq") or "").strip()
+        normalized_text = content or ("[图片] 用户发来了一张图片" if image_urls else "")
         return InboundActorEvent(
             event_id=event_id,
             channel="napcat",
             external_user_id=external_user_id,
             payload={
-                "text": content,
-                "content": content,
+                "text": normalized_text,
+                "content": normalized_text,
                 "message_type": str(payload.get("message_type") or "").strip() or "private",
-                "raw_message": content,
+                "raw_message": str(payload.get("raw_message") or "").strip(),
+                "image_urls": image_urls,
             },
         )
+
+    @staticmethod
+    def _extract_inbound_content(payload: dict) -> Tuple[str, List[str]]:
+        raw_message = str(payload.get("raw_message") or "").strip()
+        segments = payload.get("message")
+        text_parts: List[str] = []
+        image_urls: List[str] = []
+
+        if isinstance(segments, list):
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                seg_type = str(segment.get("type") or "").strip().lower()
+                data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+                if seg_type == "text":
+                    text = str(data.get("text") or "").strip()
+                    if text:
+                        text_parts.append(text)
+                elif seg_type == "image":
+                    candidate = str(data.get("url") or data.get("file") or "").strip()
+                    candidate = html.unescape(candidate)
+                    if candidate and candidate not in image_urls:
+                        image_urls.append(candidate)
+
+        if not image_urls and raw_message:
+            for match in re.finditer(r"\[CQ:image,([^\]]+)\]", raw_message):
+                attrs = match.group(1)
+                parsed = {}
+                for item in attrs.split(","):
+                    key, sep, value = item.partition("=")
+                    if not sep:
+                        continue
+                    parsed[key.strip()] = html.unescape(value.strip())
+                candidate = str(parsed.get("url") or parsed.get("file") or "").strip()
+                if candidate and candidate not in image_urls:
+                    image_urls.append(candidate)
+
+        text = "".join(text_parts).strip()
+        if not text and raw_message and "[CQ:image" not in raw_message:
+            text = raw_message
+        return text, image_urls
 
     async def send_private_text(self, external_user_id: str, content: str) -> None:
         if not self._ws:

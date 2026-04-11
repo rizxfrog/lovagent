@@ -281,7 +281,7 @@ class AdminApiTests(unittest.TestCase):
                 "lifestyle": "会关心作息和吃饭。",
                 "opening_style": "先抱一下再接话。",
                 "signature_style": "自然、轻松、有点俏皮。",
-                "emoji_style": "适度用 [心] 和 [抱抱]。",
+                "emoji_style": "适度用 ❤️ 和 🤗。",
             },
             "personality_metrics": {
                 "温柔指数": 92,

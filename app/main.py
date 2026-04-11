@@ -21,6 +21,7 @@ from app.services.napcat_service import napcat_service
 from app.services.proactive_chat_service import proactive_chat_service
 from app.services.public_media_service import PUBLIC_MEDIA_DIR, PUBLIC_MEDIA_ROUTE
 from app.services.runtime_config_service import runtime_config_service
+from app.services.setup_service import setup_service
 from app.services.tunnel_service import (
     is_invalid_autodetected_tunnel_url,
     is_quick_tunnel_url,
@@ -67,6 +68,12 @@ async def lifespan(app: FastAPI):
     logger.info("恋爱 Agent 启动中...")
     logger.info("服务地址: http://%s:%s", settings.server_host, settings.server_port)
     logger.info("企业微信回调地址: %s", callback_url)
+    try:
+        model_check = await setup_service._check_model()
+        if not model_check.get("ok"):
+            logger.error("Startup model availability check failed: %s", model_check.get("detail") or "unknown error")
+    except Exception:
+        logger.exception("Startup model availability check crashed")
     await napcat_service.start()
     proactive_scheduler_task = asyncio.create_task(proactive_chat_service.scheduler_loop())
     actor_config = runtime_config_service.get_effective_actor_config()
