@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -27,6 +28,7 @@ from app.services.tunnel_service import (
     is_quick_tunnel_url,
     tunnel_service,
 )
+from app.utils.export_graphs import export_all_graphs_to_mermaid
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -57,6 +59,10 @@ async def lifespan(app: FastAPI):
             logger.error("Startup database availability check failed: %s", database_detail or "unknown error")
     except Exception:
         logger.exception("Startup database availability check crashed")
+    
+    # 导出 agent graph 流程图到 mermaid 文件
+    export_all_graphs_to_mermaid()
+    
     tunnel_service.ensure_started()
     tunnel_status = tunnel_service.get_status()
     callback_base_url = tunnel_status["public_url"]

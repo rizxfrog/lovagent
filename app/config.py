@@ -3,11 +3,15 @@
 """
 
 import os
+import logging
 from hashlib import sha256
 
 from dotenv import load_dotenv
 from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings
+
+logging.getLogger('websockets').setLevel(logging.WARNING)
+logging.getLogger('websockets.client').setLevel(logging.WARNING)
 
 # 加载环境变量
 load_dotenv()

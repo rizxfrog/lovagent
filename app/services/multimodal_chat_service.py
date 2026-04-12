@@ -137,8 +137,8 @@ class MultimodalChatService:
         *,
         user_id: str,
         user_message: str,
-        prepared_attachments: List[Dict[str, object]],
-    ) -> Dict[str, object]:
+        prepared_attachments: list[dict[str, object]],
+    ) -> dict[str, object]:
         await memory_service.get_or_create_user(user_id)
         persona_config = persona_service.get_persona_config()
         response_constraints = get_response_constraints(user_message, persona_config.get("response_preferences"))
@@ -169,7 +169,7 @@ class MultimodalChatService:
             web_search_context={"enabled": False, "triggered": False, "query": "", "results": []},
         )
 
-        reply = ""
+        reply :str
         try:
             reply = await attachment_executor_service.generate_reply(
                 system_prompt=system_prompt,

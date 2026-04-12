@@ -3,7 +3,7 @@ NapCat OneBot11 forward WebSocket client service.
 """
 
 from __future__ import annotations
-
+from app.services.inbound_actor_service import inbound_actor_service
 import asyncio
 import html
 import json
@@ -15,6 +15,7 @@ from typing import List, Optional, Tuple
 from app.config import settings
 from app.services.redis_stream_bus import InboundActorEvent
 from app.services.runtime_config_service import runtime_config_service
+from app.graph import run_incoming_message_graph
 
 try:
     import websockets
@@ -104,6 +105,9 @@ class NapCatService:
             await asyncio.sleep(sleep_seconds)
             delay = min(30.0, delay * 2)
 
+    '''
+    the core logic of handle message from napcat server
+    '''
     async def _handle_message(self, message: str) -> None:
         try:
             payload = json.loads(message)
@@ -123,19 +127,15 @@ class NapCatService:
         if (not content and not image_urls) or not external_user_id:
             return
 
+        logger.debug(f"handle message ==> content:{content}, image_urls:{image_urls}, external_user_id:{external_user_id}")
+
         actor_config = runtime_config_service.get_effective_actor_config()
         if actor_config["actor_pipeline_enabled"]:
-            from app.services.inbound_actor_service import inbound_actor_service
-
             try:
-                await inbound_actor_service.publish_inbound_event(
-                    self._build_actor_event(payload, external_user_id, content, image_urls)
-                )
+                await inbound_actor_service.publish_inbound_event(self._build_actor_event(payload, external_user_id, content, image_urls))
                 return
             except Exception:
                 logger.exception("NapCat actor publish failed; falling back to legacy graph path")
-
-        from app.graph import run_incoming_message_graph
 
         await run_incoming_message_graph(
             {

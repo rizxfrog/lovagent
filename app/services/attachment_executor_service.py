@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 import httpx
@@ -52,6 +53,7 @@ class AttachmentExecutorService:
         top_p: float = 0.9,
         max_tokens: int = 1500,
     ) -> str:
+        logging.debug(f"generate_reply() <== attachments: {prepared_attachments}")
         if not prepared_attachments:
             raise ValueError("No prepared attachments were provided")
 
